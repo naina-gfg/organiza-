@@ -1,0 +1,30 @@
+# Arquivos versionados apenas para testes e documentacao (nao necessarios ao runtime de deploy)
+tests/
+README.md
+*.md
+
+# Dependencias locais, git e configuracoes locais
+node_modules/
+.git/
+.gitignore
+.vercelignore
+
+# Bancos locais, backups, ferramentas e variaveis locais
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backend/plataforma.db
+backups/
+tools/
+.env
+.env.*
+
+# Logs e arquivos temporarios
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Organiza+ | Tarefas</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<nav>
+  <div class="container nav-inner">
+    <a class="brand" href="dashboard.html">Organiza+</a>
+    <div class="nav-links">
+      <a href="dashboard.html">Dashboard</a>
+      <a href="disciplinas.html">Disciplinas</a>
+      <a href="tarefas.html">Tarefas</a>
+      <button class="btn-secondary" onclick="logout()">Sair</button>
+    </div>
+  </div>
+</nav>
+
+  <main class="container">
+    <h1>Tarefas</h1>
+    <section class="two-cols">
+      <div class="card">
+        <h2 id="taskFormTitle">Nova tarefa</h2>
+        <form id="taskForm">
+          <label>Título</label>
+          <input name="title" required>
+          <label>Descrição</label>
+          <textarea name="description"></textarea>
+          <label>Disciplina</label>
+          <select id="discipline_id" name="discipline_id"></select>
+          <label>Prazo</label>
+          <input type="date" name="due_date">
+          <label>Prioridade</label>
+          <select name="priority">
+            <option>Baixa</option>
+            <option selected>Média</option>
+            <option>Alta</option>
+          </select>
+          <button class="btn-primary full" type="submit">Cadastrar tarefa</button>
+          <button id="cancelEdit" class="btn-secondary full" type="button" hidden>Cancelar edição</button>
+        </form>
+        <p id="message" class="message"></p>
+      </div>
+      <div class="card">
+        <h2>Tarefas cadastradas</h2>
+        <div class="task-filters" aria-label="Filtros e ordenação de tarefas">
+          <label for="statusFilter">Status
+            <select id="statusFilter">
+              <option value="all">Todas</option>
+              <option value="Pendente">Pendentes</option>
+              <option value="Concluída">Concluídas</option>
+            </select>
+          </label>
+          <label for="priorityFilter">Prioridade
+            <select id="priorityFilter">
+              <option value="all">Todas</option>
+              <option value="Alta">Alta</option>
+              <option value="Média">Média</option>
+              <option value="Baixa">Baixa</option>
+            </select>
+          </label>
+          <label for="disciplineFilter">Disciplina
+            <select id="disciplineFilter">
+              <option value="all">Todas</option>
+              <option value="none">Sem disciplina</option>
+            </select>
+          </label>
+          <label for="dueDateFilter">Prazo
+            <select id="dueDateFilter">
+              <option value="all">Todos</option>
+              <option value="overdue">Atrasadas</option>
+              <option value="today">Vencem hoje</option>
+              <option value="next7">Próximos 7 dias</option>
+              <option value="no_due">Sem prazo</option>
+            </select>
+          </label>
+          <label for="taskSort">Ordenar por
+            <select id="taskSort">
+              <option value="current">Ordem atual</option>
+              <option value="due_asc">Prazo mais próximo</option>
+              <option value="due_desc">Prazo mais distante</option>
+              <option value="priority_desc">Maior prioridade</option>
+              <option value="priority_asc">Menor prioridade</option>
+            </select>
+          </label>
+          <div class="filter-actions">
+            <button id="clearTaskFilters" class="btn-secondary" type="button">Limpar filtros</button>
+          </div>
+        </div>
+        <p id="taskSummary" class="muted task-summary" aria-live="polite"></p>
+        <div id="taskList" class="list"></div>
+      </div>
+    </section>
+  </main>
+  <script src="js/api.js"></script>
+  <script src="js/task-utils.js"></script>
+  <script src="js/tarefas.js"></script>
+</body>
+</html>

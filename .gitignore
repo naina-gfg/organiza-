@@ -1,0 +1,42 @@
+# Dependencias instaladas (restaurar com npm ci)
+node_modules/
+
+# Bancos SQLite locais e arquivos temporarios
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backend/plataforma.db
+
+# Backups, ferramentas de patch historicas e artefatos locais
+backups/
+tools/
+LEIA-ME_TERMINAL.txt
+
+# Variaveis de ambiente e credenciais locais
+.env
+.env.*
+!.env.example
+
+# Diretorios locais de deploy/build e cobertura
+.vercel/
+public/
+coverage/
+
+# Logs e arquivos de sistema/IDE
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Arquivos duplicados vazios e relatorios internos de gate
+* (1).*
+FUNC*-*.md
+PROD*-*.md
+
+# Exclusao preventiva de artefatos didaticos externos
+*visualizador*
+*didatico*

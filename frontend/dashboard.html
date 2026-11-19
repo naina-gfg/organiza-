@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Organiza+ | Dashboard</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<nav>
+  <div class="container nav-inner">
+    <a class="brand" href="dashboard.html">Organiza+</a>
+    <div class="nav-links">
+      <a href="dashboard.html">Dashboard</a>
+      <a href="disciplinas.html">Disciplinas</a>
+      <a href="tarefas.html">Tarefas</a>
+      <button class="btn-secondary" onclick="logout()">Sair</button>
+    </div>
+  </div>
+</nav>
+
+  <main class="container">
+    <h1 id="welcome">Olá!</h1>
+    <p class="muted">Resumo da sua organização acadêmica.</p>
+    <p id="dashboardMessage" class="message" role="status" aria-live="polite">Carregando indicadores...</p>
+
+    <section class="grid" aria-label="Indicadores principais">
+      <div class="card metric"><span>Total de tarefas</span><strong id="total">—</strong></div>
+      <div class="card metric"><span>Pendentes</span><strong id="pending">—</strong></div>
+      <div class="card metric"><span>Concluídas</span><strong id="completed">—</strong></div>
+      <div class="card metric"><span>Produtividade</span><strong id="productivity">—</strong></div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="deadlineMetricsTitle">
+      <h2 id="deadlineMetricsTitle">Planejamento de prazos</h2>
+      <div class="grid dashboard-deadlines">
+        <div class="card metric"><span>Tarefas atrasadas</span><strong id="overdue">—</strong></div>
+        <div class="card metric"><span>Vencem hoje</span><strong id="dueToday">—</strong></div>
+        <div class="card metric"><span>Próximos sete dias</span><strong id="dueSoon">—</strong></div>
+      </div>
+    </section>
+
+    <section class="card dashboard-section" aria-labelledby="progressTitle">
+      <h2 id="progressTitle">Progresso</h2>
+      <div class="progress">
+        <div id="progressBar" role="progressbar" aria-label="Produtividade" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+      </div>
+    </section>
+
+    <p id="analyticsMessage" class="message" role="status" aria-live="polite">Carregando análises...</p>
+
+    <div class="dashboard-panels">
+      <section class="card" aria-labelledby="disciplineChartTitle">
+        <h2 id="disciplineChartTitle">Distribuição por disciplina</h2>
+        <ul class="dashboard-legend" aria-label="Legenda da distribuição">
+          <li><span class="legend-swatch legend-pending" aria-hidden="true"></span>Pendentes</li>
+          <li><span class="legend-swatch legend-completed" aria-hidden="true"></span>Concluídas</li>
+        </ul>
+        <div id="disciplineChart" class="dashboard-chart" role="list"></div>
+        <p id="disciplineEmpty" class="muted" hidden>Nenhuma tarefa cadastrada para distribuir.</p>
+      </section>
+
+      <section class="card" aria-labelledby="statusSummaryTitle">
+        <h2 id="statusSummaryTitle">Resumo de tarefas</h2>
+        <div id="statusSummary" class="dashboard-status-summary"></div>
+        <div class="dashboard-status-bar" aria-hidden="true">
+          <span id="statusPendingBar" class="status-segment status-pending"></span>
+          <span id="statusCompletedBar" class="status-segment status-completed"></span>
+        </div>
+        <p class="muted">Contagens e percentuais de tarefas pendentes e concluídas.</p>
+      </section>
+    </div>
+
+    <section class="card dashboard-section" aria-labelledby="upcomingTitle">
+      <h2 id="upcomingTitle">Próximas entregas acadêmicas</h2>
+      <ol id="upcomingTasks" class="dashboard-upcoming"></ol>
+      <p id="upcomingEmpty" class="muted" hidden>Nenhuma entrega futura com prazo válido.</p>
+    </section>
+  </main>
+  <script src="js/api.js"></script>
+  <script src="js/task-utils.js"></script>
+  <script src="js/dashboard.js"></script>
+</body>
+</html>
