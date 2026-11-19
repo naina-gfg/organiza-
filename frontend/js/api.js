@@ -88,6 +88,15 @@
     }
   }
 
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('click', (event) => {
+      const target = event && event.target;
+      if (target && typeof target.closest === 'function' && target.closest('[data-logout]')) {
+        logout();
+      }
+    });
+  }
+
   window.OrganizaAPI = Object.freeze({
     request, readSession, saveSession, clearSession, showMessage, logout
   });

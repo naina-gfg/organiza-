@@ -1,18 +1,46 @@
 const express = require('express');
 const path = require('path');
-const crypto = require('crypto');
 const db = require('./database');
+const { createPasswordManager, CryptoBusyError } = require(path.join(__dirname, 'security', 'password'));
+const {
+  resolveSessionTtlMs,
+  createSession,
+  validateSession,
+  revokeSession
+} = require(path.join(__dirname, 'security', 'session'));
+const {
+  resolveRateLimitConfig,
+  resolveTrustProxy,
+  getClientIp,
+  consumeRateLimit,
+  resetRateLimit,
+  cleanupExpiredRateLimits
+} = require(path.join(__dirname, 'security', 'rate-limit'));
+const { applySecurityHeaders } = require(path.join(__dirname, 'security', 'headers'));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const sessions = new Map();
 const MAX_PG_INT = 2147483647;
+const MAX_NAME_LENGTH = 120;
+const MAX_EMAIL_LENGTH = 254;
+const MAX_TASK_TITLE_LENGTH = 200;
+const MAX_TASK_DESCRIPTION_LENGTH = 2000;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-app.use(express.json());
+const passwordManager = createPasswordManager(process.env);
+const sessionTtlMs = resolveSessionTtlMs(process.env);
+const rateLimitConfig = resolveRateLimitConfig(process.env);
+const trustProxy = resolveTrustProxy(process.env);
+
+if (typeof app.disable === 'function') app.disable('x-powered-by');
+if (typeof app.set === 'function') app.set('trust proxy', trustProxy);
+
+app.use(applySecurityHeaders);
+app.use(express.json({ limit: '16kb' }));
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
-function hashPassword(password) {
-  return crypto.createHash('sha256').update(password).digest('hex');
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function parsePositiveId(rawId) {
@@ -46,77 +74,261 @@ function isForeignKeyError(err) {
   );
 }
 
-function auth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.substring(7) : null;
-  const userId = token ? sessions.get(token) : null;
-
-  if (!userId) {
-    return res.status(401).json({ error: 'Usuário não autenticado.' });
+function validateTaskPayload(rawBody, { requirePriority = false, asciiMessages = false } = {}) {
+  if (!isPlainObject(rawBody)) {
+    return { error: asciiMessages ? 'Dados da tarefa invalidos.' : 'Dados da tarefa inválidos.' };
   }
 
-  req.userId = userId;
-  next();
+  const { title, description, discipline_id, due_date, priority } = rawBody;
+
+  if (typeof title !== 'string' || !title.trim()) {
+    return { error: asciiMessages ? 'Informe o titulo da tarefa.' : 'Informe o título da tarefa.' };
+  }
+  const cleanTitle = title.trim();
+  if (cleanTitle.length > MAX_TASK_TITLE_LENGTH) {
+    return { error: `O título da tarefa deve ter no máximo ${MAX_TASK_TITLE_LENGTH} caracteres.` };
+  }
+
+  if (description != null && typeof description !== 'string') {
+    return { error: asciiMessages ? 'Descricao invalida.' : 'Descrição inválida.' };
+  }
+  const cleanDescription = typeof description === 'string' ? description.trim() : '';
+  if (cleanDescription.length > MAX_TASK_DESCRIPTION_LENGTH) {
+    return { error: `A descrição deve ter no máximo ${MAX_TASK_DESCRIPTION_LENGTH} caracteres.` };
+  }
+
+  const resolvedPriority = !requirePriority && priority === undefined ? 'Média' : priority;
+  if (!['Baixa', 'Média', 'Alta'].includes(resolvedPriority)) {
+    return { error: asciiMessages ? 'Prioridade invalida.' : 'Prioridade inválida.' };
+  }
+
+  const prazo = due_date === undefined || due_date === null || due_date === '' ? null : due_date;
+  if (prazo !== null) {
+    if (typeof prazo !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(prazo)) {
+      return { error: asciiMessages ? 'Prazo invalido.' : 'Prazo inválido.' };
+    }
+    const date = new Date(`${prazo}T00:00:00Z`);
+    if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== prazo) {
+      return { error: 'Data inexistente.' };
+    }
+  }
+
+  let disciplineId = null;
+  if (discipline_id !== null && discipline_id !== undefined && discipline_id !== '') {
+    if (typeof discipline_id !== 'number' && typeof discipline_id !== 'string') {
+      return { error: asciiMessages ? 'Disciplina invalida.' : 'Disciplina inválida.' };
+    }
+    disciplineId = parsePositiveId(discipline_id);
+    if (!disciplineId) {
+      return { error: asciiMessages ? 'Disciplina invalida.' : 'Disciplina inválida.' };
+    }
+  }
+
+  return {
+    value: {
+      title: cleanTitle,
+      description: cleanDescription,
+      disciplineId,
+      dueDate: prazo,
+      priority: resolvedPriority
+    }
+  };
 }
 
-app.post('/api/register', (req, res) => {
-  const { name, email, password } = req.body || {};
-  if (
-    typeof name !== 'string' || !name.trim() ||
-    typeof email !== 'string' || !email.trim() ||
-    typeof password !== 'string' || !password
-  ) {
-    return res.status(400).json({ error: 'Preencha nome, e-mail e senha.' });
-  }
+function sendRateLimitExceeded(res, retryAfterSeconds, message) {
+  res.setHeader('Retry-After', String(retryAfterSeconds));
+  return res.status(429).json({ error: message });
+}
 
-  const passwordHash = hashPassword(password);
-  db.run(
-    'INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)',
-    [name.trim(), email.trim().toLowerCase(), passwordHash],
-    function (err) {
-      if (err) {
-        if (isUniqueConstraintError(err)) {
-          return res.status(409).json({ error: 'Este e-mail já está cadastrado.' });
+function handleCryptoError(err, res, fallbackMessage) {
+  if (err instanceof CryptoBusyError || (err && err.name === 'CryptoBusyError')) {
+    res.setHeader('Retry-After', String(err.retryAfterSeconds || 2));
+    return res.status(503).json({ error: err.message });
+  }
+  return res.status(500).json({ error: fallbackMessage });
+}
+
+async function auth(req, res, next) {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+    const session = await validateSession(db, token);
+
+    if (!session) {
+      return res.status(401).json({ error: 'Usuário não autenticado.' });
+    }
+
+    req.userId = session.userId;
+    req.sessionId = session.sessionId;
+    req.tokenHash = session.tokenHash;
+    next();
+  } catch {
+    return res.status(500).json({ error: 'Erro ao validar sessão.' });
+  }
+}
+
+app.post('/api/register', async (req, res) => {
+  try {
+    const clientIp = getClientIp(req, { trustProxy });
+    const ipLimit = await consumeRateLimit(db, {
+      scope: 'register:ip',
+      identifier: clientIp,
+      maxAttempts: rateLimitConfig.registerMax,
+      windowMs: rateLimitConfig.windowMs,
+      blockMs: rateLimitConfig.blockMs
+    });
+    if (!ipLimit.allowed) {
+      return sendRateLimitExceeded(
+        res,
+        ipLimit.retryAfterSeconds,
+        'Muitas tentativas de cadastro. Aguarde antes de tentar novamente.'
+      );
+    }
+
+    if (!isPlainObject(req.body)) {
+      return res.status(400).json({ error: 'Dados de cadastro inválidos.' });
+    }
+
+    const { name, email, password } = req.body;
+    if (
+      typeof name !== 'string' || !name.trim() ||
+      typeof email !== 'string' || !email.trim() ||
+      typeof password !== 'string' || !password
+    ) {
+      return res.status(400).json({ error: 'Preencha nome, e-mail e senha.' });
+    }
+
+    const cleanName = name.trim();
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (cleanName.length > MAX_NAME_LENGTH) {
+      return res.status(400).json({ error: `O nome deve ter no máximo ${MAX_NAME_LENGTH} caracteres.` });
+    }
+    if (cleanEmail.length > MAX_EMAIL_LENGTH || !EMAIL_REGEX.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Informe um e-mail válido.' });
+    }
+
+    const passwordCheck = passwordManager.validatePasswordStrength(password);
+    if (!passwordCheck.valid) {
+      return res.status(400).json({ error: passwordCheck.error });
+    }
+
+    const passwordHash = await passwordManager.hashPassword(password);
+    cleanupExpiredRateLimits(db).catch(() => {});
+
+    db.run(
+      'INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)',
+      [cleanName, cleanEmail, passwordHash],
+      function (err) {
+        if (err) {
+          if (isUniqueConstraintError(err)) {
+            return res.status(409).json({ error: 'Este e-mail já está cadastrado.' });
+          }
+          return res.status(500).json({ error: 'Erro ao cadastrar usuário.' });
         }
-        return res.status(500).json({ error: 'Erro ao cadastrar usuário.' });
+        res.status(201).json({ message: 'Cadastro realizado com sucesso.' });
       }
-      res.status(201).json({ message: 'Cadastro realizado com sucesso.' });
-    }
-  );
-});
-
-app.post('/api/login', (req, res) => {
-  const { email, password } = req.body || {};
-  if (
-    typeof email !== 'string' || !email.trim() ||
-    typeof password !== 'string' || !password
-  ) {
-    return res.status(400).json({ error: 'Informe e-mail e senha.' });
+    );
+  } catch (err) {
+    return handleCryptoError(err, res, 'Erro ao cadastrar usuário.');
   }
-
-  db.get(
-    'SELECT id, name, email, password_hash FROM users WHERE email = ?',
-    [email.trim().toLowerCase()],
-    (err, user) => {
-      if (err) return res.status(500).json({ error: 'Erro interno.' });
-      if (!user || user.password_hash !== hashPassword(password)) {
-        return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
-      }
-
-      const token = crypto.randomUUID();
-      sessions.set(token, user.id);
-      res.json({
-        token,
-        user: { id: user.id, name: user.name, email: user.email }
-      });
-    }
-  );
 });
 
-app.post('/api/logout', auth, (req, res) => {
-  const token = (req.headers.authorization || '').substring(7);
-  sessions.delete(token);
-  res.json({ message: 'Sessão encerrada.' });
+app.post('/api/login', async (req, res) => {
+  try {
+    const clientIp = getClientIp(req, { trustProxy });
+    const ipLimit = await consumeRateLimit(db, {
+      scope: 'login:ip',
+      identifier: clientIp,
+      maxAttempts: rateLimitConfig.loginMax,
+      windowMs: rateLimitConfig.windowMs,
+      blockMs: rateLimitConfig.blockMs
+    });
+    if (!ipLimit.allowed) {
+      return sendRateLimitExceeded(
+        res,
+        ipLimit.retryAfterSeconds,
+        'Muitas tentativas de login. Aguarde antes de tentar novamente.'
+      );
+    }
+
+    if (!isPlainObject(req.body)) {
+      return res.status(400).json({ error: 'Informe e-mail e senha.' });
+    }
+
+    const { email, password } = req.body;
+    if (
+      typeof email !== 'string' || !email.trim() ||
+      typeof password !== 'string' || !password
+    ) {
+      return res.status(400).json({ error: 'Informe e-mail e senha.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    if (cleanEmail.length > MAX_EMAIL_LENGTH || password.length > passwordManager.MAX_PASSWORD_LENGTH) {
+      return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
+    }
+
+    const accountLimit = await consumeRateLimit(db, {
+      scope: 'login:acct',
+      identifier: cleanEmail,
+      maxAttempts: rateLimitConfig.loginAccountMax,
+      windowMs: rateLimitConfig.windowMs,
+      blockMs: rateLimitConfig.blockMs
+    });
+    if (!accountLimit.allowed) {
+      return sendRateLimitExceeded(
+        res,
+        accountLimit.retryAfterSeconds,
+        'Muitas tentativas de login. Aguarde antes de tentar novamente.'
+      );
+    }
+
+    db.get(
+      'SELECT id, name, email, password_hash FROM users WHERE email = ?',
+      [cleanEmail],
+      async (err, user) => {
+        if (err) return res.status(500).json({ error: 'Erro interno.' });
+        try {
+          if (!user) {
+            await passwordManager.verifyDummyPassword();
+            return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
+          }
+
+          const passwordMatches = await passwordManager.verifyPassword(password, user.password_hash);
+          if (!passwordMatches) {
+            return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
+          }
+
+          await resetRateLimit(db, { scope: 'login:acct', identifier: cleanEmail }).catch(() => {});
+          cleanupExpiredRateLimits(db).catch(() => {});
+
+          const session = await createSession(db, user.id, { ttlMs: sessionTtlMs });
+          return res.json({
+            token: session.token,
+            user: { id: user.id, name: user.name, email: user.email }
+          });
+        } catch (cryptoOrSessionErr) {
+          return handleCryptoError(cryptoOrSessionErr, res, 'Erro interno.');
+        }
+      }
+    );
+  } catch (err) {
+    return handleCryptoError(err, res, 'Erro interno.');
+  }
+});
+
+app.post('/api/logout', auth, async (req, res) => {
+  try {
+    await revokeSession(db, {
+      sessionId: req.sessionId,
+      userId: req.userId,
+      tokenHash: req.tokenHash
+    });
+    return res.json({ message: 'Sessão encerrada.' });
+  } catch {
+    return res.status(500).json({ error: 'Erro ao encerrar sessão.' });
+  }
 });
 
 app.get('/api/dashboard', auth, (req, res) => {
@@ -184,17 +396,24 @@ app.get('/api/disciplines', auth, (req, res) => {
 });
 
 app.post('/api/disciplines', auth, (req, res) => {
-  const { name } = req.body || {};
+  if (!isPlainObject(req.body)) {
+    return res.status(400).json({ error: 'Informe o nome da disciplina.' });
+  }
+  const { name } = req.body;
   if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Informe o nome da disciplina.' });
+  }
+  const cleanName = name.trim();
+  if (cleanName.length > MAX_NAME_LENGTH) {
+    return res.status(400).json({ error: `O nome da disciplina deve ter no máximo ${MAX_NAME_LENGTH} caracteres.` });
   }
 
   db.run(
     'INSERT INTO disciplines (user_id, name) VALUES (?, ?)',
-    [req.userId, name.trim()],
+    [req.userId, cleanName],
     function (err) {
       if (err) return res.status(500).json({ error: 'Erro ao cadastrar disciplina.' });
-      res.status(201).json({ id: this.lastID, name: name.trim() });
+      res.status(201).json({ id: this.lastID, name: cleanName });
     }
   );
 });
@@ -239,10 +458,11 @@ app.get('/api/tasks', auth, (req, res) => {
 });
 
 app.post('/api/tasks', auth, (req, res) => {
-  const { title, description, discipline_id, due_date, priority } = req.body || {};
-  if (typeof title !== 'string' || !title.trim()) {
-    return res.status(400).json({ error: 'Informe o título da tarefa.' });
+  const parsed = validateTaskPayload(req.body, { requirePriority: false, asciiMessages: false });
+  if (parsed.error) {
+    return res.status(400).json({ error: parsed.error });
   }
+  const { title, description, disciplineId, dueDate, priority } = parsed.value;
 
   // Preserva a criação de tarefas sem disciplina, existente na V0.
   function insertTask(verifiedDisciplineId) {
@@ -253,10 +473,10 @@ app.post('/api/tasks', auth, (req, res) => {
       [
         req.userId,
         verifiedDisciplineId,
-        title.trim(),
-        typeof description === 'string' ? description.trim() : '',
-        due_date || null,
-        priority || 'Média'
+        title,
+        description,
+        dueDate,
+        priority
       ],
       function (err) {
         if (err) {
@@ -270,21 +490,14 @@ app.post('/api/tasks', auth, (req, res) => {
     );
   }
 
-  if (discipline_id === null || discipline_id === undefined || discipline_id === '') {
+  if (disciplineId === null) {
     return insertTask(null);
-  }
-  if (typeof discipline_id !== 'number' && typeof discipline_id !== 'string') {
-    return res.status(400).json({ error: 'Disciplina inválida.' });
-  }
-  const selectedDisciplineId = parsePositiveId(discipline_id);
-  if (!selectedDisciplineId) {
-    return res.status(400).json({ error: 'Disciplina inválida.' });
   }
 
   // Validação de propriedade antes de associar tarefa e disciplina.
   db.get(
     'SELECT id FROM disciplines WHERE id = ? AND user_id = ?',
-    [selectedDisciplineId, req.userId],
+    [disciplineId, req.userId],
     (err, discipline) => {
       if (err) return res.status(500).json({ error: 'Erro ao validar disciplina.' });
       if (!discipline) {
@@ -303,51 +516,11 @@ app.put('/api/tasks/:id', auth, (req, res) => {
     return res.status(400).json({ error: 'ID da tarefa invalido.' });
   }
 
-  const { title, description, discipline_id, due_date, priority } = req.body || {};
-
-  if (typeof title !== 'string' || !title.trim()) {
-    return res.status(400).json({ error: 'Informe o titulo da tarefa.' });
+  const parsed = validateTaskPayload(req.body, { requirePriority: true, asciiMessages: true });
+  if (parsed.error) {
+    return res.status(400).json({ error: parsed.error });
   }
-
-  if (description != null && typeof description !== 'string') {
-    return res.status(400).json({ error: 'Descricao invalida.' });
-  }
-
-  if (!['Baixa', 'Média', 'Alta'].includes(priority)) {
-    return res.status(400).json({ error: 'Prioridade invalida.' });
-  }
-
-  const prazo = due_date === null || due_date === '' ? null : due_date;
-
-  if (prazo !== null) {
-    if (typeof prazo !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(prazo)) {
-      return res.status(400).json({ error: 'Prazo invalido.' });
-    }
-
-    const date = new Date(`${prazo}T00:00:00Z`);
-
-    if (Number.isNaN(date.getTime()) ||
-        date.toISOString().slice(0, 10) !== prazo) {
-      return res.status(400).json({ error: 'Data inexistente.' });
-    }
-  }
-
-  let disciplineId = null;
-
-  if (discipline_id !== null &&
-      discipline_id !== undefined &&
-      discipline_id !== '') {
-    if (typeof discipline_id !== 'number' &&
-        typeof discipline_id !== 'string') {
-      return res.status(400).json({ error: 'Disciplina invalida.' });
-    }
-
-    disciplineId = parsePositiveId(discipline_id);
-
-    if (!disciplineId) {
-      return res.status(400).json({ error: 'Disciplina invalida.' });
-    }
-  }
+  const { title, description, disciplineId, dueDate, priority } = parsed.value;
 
   db.get(
     'SELECT id FROM tasks WHERE id = ? AND user_id = ?',
@@ -363,10 +536,10 @@ app.put('/api/tasks/:id', auth, (req, res) => {
                due_date = ?, priority = ?
            WHERE id = ? AND user_id = ?`,
           [
-            title.trim(),
-            (description || '').trim(),
+            title,
+            description,
             verifiedDisciplineId,
-            prazo,
+            dueDate,
             priority,
             taskId,
             req.userId
@@ -421,7 +594,11 @@ app.patch('/api/tasks/:id/status', auth, (req, res) => {
     return res.status(400).json({ error: 'ID da tarefa inválido.' });
   }
 
-  const { status } = req.body || {};
+  if (!isPlainObject(req.body)) {
+    return res.status(400).json({ error: 'Status inválido.' });
+  }
+
+  const { status } = req.body;
   if (!['Pendente', 'Concluída'].includes(status)) {
     return res.status(400).json({ error: 'Status inválido.' });
   }
@@ -458,8 +635,27 @@ app.delete('/api/tasks/:id', auth, (req, res) => {
   );
 });
 
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Endpoint da API não encontrado.' });
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'frontend', 'index.html'));
+});
+
+app.use((err, req, res, next) => {
+  if (!err) return next();
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Corpo da requisição excede o limite permitido.' });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'JSON inválido na requisição.' });
+  }
+  if (err instanceof CryptoBusyError || err.name === 'CryptoBusyError') {
+    res.setHeader('Retry-After', String(err.retryAfterSeconds || 2));
+    return res.status(503).json({ error: err.message });
+  }
+  return res.status(500).json({ error: 'Erro interno do servidor.' });
 });
 
 app.db = db;

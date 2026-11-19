@@ -12,11 +12,11 @@
       <h1>Criar conta</h1>
       <form id="registerForm">
         <label>Nome</label>
-        <input name="name" required>
+        <input name="name" maxlength="120" required>
         <label>E-mail</label>
-        <input type="email" name="email" required>
+        <input type="email" name="email" maxlength="254" required>
         <label>Senha</label>
-        <input type="password" name="password" minlength="4" required>
+        <input type="password" name="password" minlength="8" maxlength="128" required>
         <button class="btn-primary full" type="submit">Cadastrar</button>
       </form>
       <p id="message" class="message"></p>

@@ -4,7 +4,6 @@
 // O banco backend/plataforma.db nunca e aberto por esta suite.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -13,8 +12,13 @@ const express = require('express');
 const taskUtils = require('../frontend/js/task-utils.js');
 
 const root = path.resolve(__dirname, '..');
+const { createPasswordManager } = require(path.join(root, 'backend', 'security', 'password'));
 const serverSource = fs.readFileSync(
   path.join(root, 'backend', 'server.js'),
+  'utf8'
+);
+const sqliteSessionsMigration = fs.readFileSync(
+  path.join(root, 'migrations', 'sqlite', '002_sessions_and_rate_limits.sql'),
   'utf8'
 );
 const password = 'func02-isolated-test-password';
@@ -61,7 +65,9 @@ async function createFixture() {
     status TEXT DEFAULT 'Pendente'
   )`);
 
-  const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
+  await new Promise((resolve, reject) => db.exec(sqliteSessionsMigration, err => err ? reject(err) : resolve()));
+
+  const passwordHash = await createPasswordManager().hashPassword(password);
   await run(db, 'INSERT INTO users VALUES (?, ?, ?, ?)', [1, 'Teste Um', 'um@func02.local', passwordHash]);
   await run(db, 'INSERT INTO users VALUES (?, ?, ?, ?)', [2, 'Teste Dois', 'dois@func02.local', passwordHash]);
   await run(db, 'INSERT INTO disciplines VALUES (?, ?, ?)', [11, 1, 'Disciplina própria']);

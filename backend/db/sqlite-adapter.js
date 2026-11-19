@@ -1,6 +1,12 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
 const { sanitizeErrorMessage } = require('./config');
+
+const SQLITE_MIGRATIONS_DIR = path.resolve(__dirname, '..', '..', 'migrations', 'sqlite');
+const SQLITE_MIGRATION_001 = fs.readFileSync(path.join(SQLITE_MIGRATIONS_DIR, '001_initial_schema.sql'), 'utf8');
+const SQLITE_MIGRATION_002 = fs.readFileSync(path.join(SQLITE_MIGRATIONS_DIR, '002_sessions_and_rate_limits.sql'), 'utf8');
 
 function normalizeArgs(params, cb) {
   if (typeof params === 'function') {
@@ -21,6 +27,15 @@ function runRaw(rawDb, sql, params = []) {
   });
 }
 
+function execRaw(rawDb, sql) {
+  return new Promise((resolve, reject) => {
+    rawDb.exec(sql, (err) => {
+      if (err) return reject(err);
+      resolve();
+    });
+  });
+}
+
 function allRaw(rawDb, sql, params = []) {
   return new Promise((resolve, reject) => {
     rawDb.all(sql, params, (err, rows) => {
@@ -32,45 +47,7 @@ function allRaw(rawDb, sql, params = []) {
 
 async function initializeSqliteSchema(rawDb) {
   await runRaw(rawDb, 'PRAGMA busy_timeout = 5000');
-
-  await runRaw(
-    rawDb,
-    `CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`
-  );
-
-  await runRaw(
-    rawDb,
-    `CREATE TABLE IF NOT EXISTS disciplines (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    )`
-  );
-
-  await runRaw(
-    rawDb,
-    `CREATE TABLE IF NOT EXISTS tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      discipline_id INTEGER,
-      title TEXT NOT NULL,
-      description TEXT,
-      due_date TEXT,
-      priority TEXT DEFAULT 'Média',
-      status TEXT DEFAULT 'Pendente',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY(discipline_id) REFERENCES disciplines(id) ON DELETE SET NULL
-    )`
-  );
+  await execRaw(rawDb, SQLITE_MIGRATION_001);
 
   // Atualiza bancos SQLite legados que ainda nao possuam ON DELETE SET NULL em tasks.discipline_id
   const fkList = await allRaw(rawDb, "PRAGMA foreign_key_list('tasks')");
@@ -123,43 +100,10 @@ async function initializeSqliteSchema(rawDb) {
       await runRaw(rawDb, 'ROLLBACK').catch(() => {});
       throw err;
     }
+    await execRaw(rawDb, SQLITE_MIGRATION_001);
   }
 
-  await runRaw(rawDb, 'CREATE INDEX IF NOT EXISTS idx_disciplines_user_name ON disciplines (user_id, name, id)');
-  await runRaw(rawDb, 'CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks (user_id)');
-  await runRaw(rawDb, 'CREATE INDEX IF NOT EXISTS idx_tasks_user_discipline ON tasks (user_id, discipline_id)');
-  await runRaw(rawDb, 'CREATE INDEX IF NOT EXISTS idx_tasks_user_default_order ON tasks (user_id, status, priority, due_date, id)');
-
-  await runRaw(
-    rawDb,
-    `CREATE TRIGGER IF NOT EXISTS trg_tasks_discipline_owner_insert
-     BEFORE INSERT ON tasks
-     FOR EACH ROW
-     WHEN NEW.discipline_id IS NOT NULL
-       AND NOT EXISTS (
-         SELECT 1 FROM disciplines d
-         WHERE d.id = NEW.discipline_id AND d.user_id = NEW.user_id
-       )
-     BEGIN
-       SELECT RAISE(ABORT, 'CROSS_USER_DISCIPLINE');
-     END`
-  );
-
-  await runRaw(
-    rawDb,
-    `CREATE TRIGGER IF NOT EXISTS trg_tasks_discipline_owner_update
-     BEFORE UPDATE OF discipline_id, user_id ON tasks
-     FOR EACH ROW
-     WHEN NEW.discipline_id IS NOT NULL
-       AND NOT EXISTS (
-         SELECT 1 FROM disciplines d
-         WHERE d.id = NEW.discipline_id AND d.user_id = NEW.user_id
-       )
-     BEGIN
-       SELECT RAISE(ABORT, 'CROSS_USER_DISCIPLINE');
-     END`
-  );
-
+  await execRaw(rawDb, SQLITE_MIGRATION_002);
   await runRaw(rawDb, 'PRAGMA foreign_keys = ON');
 }
 

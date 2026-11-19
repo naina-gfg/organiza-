@@ -24,8 +24,8 @@
       const email = String(data.get('email') || '').trim();
       const password = String(data.get('password') || '');
 
-      if (!name || !email || password.length < 4) {
-        api.showMessage(messageElement, 'Informe nome, e-mail e senha com pelo menos 4 caracteres.', true);
+      if (!name || name.length > 120 || !email || email.length > 254 || password.length < 8 || password.length > 128) {
+        api.showMessage(messageElement, 'Informe nome, e-mail válido e senha entre 8 e 128 caracteres.', true);
         return;
       }
 
@@ -51,8 +51,8 @@
       const data = new FormData(loginForm);
       const email = String(data.get('email') || '').trim();
       const password = String(data.get('password') || '');
-      if (!email || !password) {
-        api.showMessage(messageElement, 'Informe e-mail e senha.', true);
+      if (!email || email.length > 254 || !password || password.length > 128) {
+        api.showMessage(messageElement, 'Informe e-mail e senha válidos.', true);
         return;
       }
 

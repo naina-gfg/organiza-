@@ -2,7 +2,6 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -11,8 +10,13 @@ const express = require('express');
 const taskUtils = require('../frontend/js/task-utils.js');
 
 const ROOT = path.resolve(__dirname, '..');
+const { createPasswordManager } = require(path.join(ROOT, 'backend', 'security', 'password'));
 const TODAY = '2026-06-15';
 const serverSource = fs.readFileSync(path.join(ROOT, 'backend', 'server.js'), 'utf8');
+const sqliteSessionsMigration = fs.readFileSync(
+  path.join(ROOT, 'migrations', 'sqlite', '002_sessions_and_rate_limits.sql'),
+  'utf8'
+);
 
 function makeTasks() {
   return [
@@ -61,8 +65,10 @@ async function createApiFixture() {
     description TEXT, due_date TEXT, priority TEXT DEFAULT 'Média', status TEXT DEFAULT 'Pendente'
   )`);
 
+  await new Promise((resolve, reject) => db.exec(sqliteSessionsMigration, err => err ? reject(err) : resolve()));
+
   const password = 'func04-isolated-test-password';
-  const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
+  const passwordHash = await createPasswordManager().hashPassword(password);
   await run(db, 'INSERT INTO users VALUES (?, ?, ?, ?)', [1, 'Conta Um', 'um@func04.local', passwordHash]);
   await run(db, 'INSERT INTO users VALUES (?, ?, ?, ?)', [2, 'Conta Dois', 'dois@func04.local', passwordHash]);
   await run(db, 'INSERT INTO users VALUES (?, ?, ?, ?)', [3, 'Conta Vazia', 'vazia@func04.local', passwordHash]);

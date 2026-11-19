@@ -101,6 +101,8 @@ assert.ok(pgBin, 'Binarios locais do PostgreSQL 17 nao encontrados para testes r
 
 const migration001 = fs.readFileSync(path.join(ROOT, 'migrations', '001_initial_schema.sql'), 'utf8');
 const migration002 = fs.readFileSync(path.join(ROOT, 'migrations', '002_roles_and_rls.sql'), 'utf8');
+const migration003 = fs.readFileSync(path.join(ROOT, 'migrations', '003_sessions_and_rate_limits.sql'), 'utf8');
+const migration004 = fs.readFileSync(path.join(ROOT, 'migrations', '004_sessions_rls_and_grants.sql'), 'utf8');
 const rollback002 = fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '002_roles_and_rls_down.sql'), 'utf8');
 const rollback001 = fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '001_initial_schema_down.sql'), 'utf8');
 
@@ -155,6 +157,8 @@ async function setupEphemeralPostgres() {
 
   await adminPool.query(migration001);
   await adminPool.query(migration002);
+  await adminPool.query(migration003);
+  await adminPool.query(migration004);
   await adminPool.query(`ALTER ROLE organiza_app WITH LOGIN PASSWORD '${runtimePassword}'`);
 
   const runtimeDatabaseUrl = `postgresql://organiza_app:${runtimePassword}@127.0.0.1:${port}/organiza_test`;
@@ -506,7 +510,7 @@ test('PostgreSQL 17: ciclo completo via organiza_app, integridade referencial no
 });
 
 test('Equivalência completa SQLite × PostgreSQL: ordenação com prazos nulos, datas, tipos, edição, exclusão e dashboard', async () => {
-  await cluster.adminPool.query('TRUNCATE TABLE tasks, disciplines, users RESTART IDENTITY CASCADE');
+  await cluster.adminPool.query('TRUNCATE TABLE rate_limits, sessions, tasks, disciplines, users RESTART IDENTITY CASCADE');
 
   const sqliteDir = fs.mkdtempSync(path.join(os.tmpdir(), 'organiza-equiv-sqlite-'));
   const sqliteFile = path.join(sqliteDir, 'equiv.db');
