@@ -16,6 +16,9 @@ const {
   cleanupExpiredSessions
 } = require(path.join(ROOT, 'backend', 'security', 'session'));
 const {
+  resolveTrustProxy,
+  toExpressTrustProxy,
+  normalizeIp,
   getClientIp,
   cleanupExpiredRateLimits
 } = require(path.join(ROOT, 'backend', 'security', 'rate-limit'));
@@ -91,23 +94,33 @@ test('proteção de senhas: scrypt assíncrono gera hashes distintos, versionado
   const h2 = await pm.hashPassword('SenhaForte#2026');
 
   assert.notEqual(h1, h2, 'mesma senha deve gerar salts e hashes distintos');
-  assert.match(h1, /^\$scrypt\$v=1\$N=32768,r=8,p=1\$[A-Za-z0-9_-]{22,}\$[A-Za-z0-9_-]{43,}$/);
+  assert.match(h1, /^\$scrypt\$v=1\$N=32768,r=8,p=3\$[A-Za-z0-9_-]{22,}\$[A-Za-z0-9_-]{43,}$/);
   assert.equal(h1.includes('SenhaForte'), false);
+  assert.equal(pm.needsRehash(h1), false);
 
   assert.equal(await pm.verifyPassword('SenhaForte#2026', h1), true);
   assert.equal(await pm.verifyPassword('SenhaForte#2026', h2), true);
   assert.equal(await pm.verifyPassword('SenhaErrada#2026', h1), false);
+
+  // Preserva verificacao de hash scrypt emitido anteriormente (p=1) e sinaliza necessidade de rehash
+  const p1Salt = crypto.randomBytes(16);
+  const p1Key = await new Promise((res, rej) =>
+    crypto.scrypt('SenhaForte#2026', p1Salt, 32, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (e, k) => e ? rej(e) : res(k))
+  );
+  const p1Hash = `$scrypt$v=1$N=32768,r=8,p=1$${p1Salt.toString('base64url')}$${p1Key.toString('base64url')}`;
+  assert.equal(await pm.verifyPassword('SenhaForte#2026', p1Hash), true);
+  assert.equal(pm.needsRehash(p1Hash), true);
 
   // Rejeita hash SHA-256 legado e formatos corrompidos
   const legacySha = crypto.createHash('sha256').update('SenhaForte#2026').digest('hex');
   assert.equal(await pm.verifyPassword('SenhaForte#2026', legacySha), false);
   assert.equal(await pm.verifyPassword('SenhaForte#2026', '$scrypt$v=1$N=16,r=8,p=1$abc$def'), false);
 
-  // Limite de tamanho
-  assert.equal(pm.validatePasswordStrength('1234567').valid, false);
+  // Limite de tamanho OWASP sem MFA (15..128)
+  assert.equal(pm.validatePasswordStrength('12345678901234').valid, false);
   assert.equal(pm.validatePasswordStrength('a'.repeat(129)).valid, false);
-  assert.equal(pm.validatePasswordStrength('12345678').valid, true);
-  await assert.rejects(() => pm.hashPassword('curta'), /entre 8 e 128/i);
+  assert.equal(pm.validatePasswordStrength('123456789012345').valid, true);
+  await assert.rejects(() => pm.hashPassword('curta14chars!!'), /entre 15 e 128/i);
 });
 
 test('limitação de concorrência criptográfica do scrypt protege fila sob rajada', async () => {
@@ -133,18 +146,36 @@ test('limitação de concorrência criptográfica do scrypt protege fila sob raj
   }
 });
 
-test('getClientIp ignora X-Forwarded-For quando TRUST_PROXY=false e respeita req.ip quando explicitado', () => {
+test('proxy confiável: rejeita TRUST_PROXY=true, normaliza IPv4/IPv6 e ignora spoof sem Vercel', () => {
+  assert.equal(resolveTrustProxy({}), false);
+  assert.equal(resolveTrustProxy({ VERCEL: '1' }), 'vercel');
+  assert.equal(resolveTrustProxy({ VERCEL: '1', TRUST_PROXY: 'false' }), false);
+  assert.equal(resolveTrustProxy({ TRUST_PROXY: '1' }), 1);
+  assert.equal(toExpressTrustProxy('vercel'), 1);
+  assert.equal(toExpressTrustProxy(false), false);
+  assert.throws(() => resolveTrustProxy({ TRUST_PROXY: 'true' }), /TRUST_PROXY=true nao e permitido/i);
+
+  assert.equal(normalizeIp('::ffff:198.51.100.77'), '198.51.100.77');
+  assert.equal(normalizeIp('2001:0DB8:0000:0000:0000:0000:0000:0001'), '2001:db8::1');
+  assert.equal(normalizeIp('[2001:db8::1]:443'), '2001:db8::1');
+  assert.equal(normalizeIp('invalid-spoofed-header'), null);
+
   const fakeReq = {
     ip: '198.51.100.77',
-    headers: { 'x-forwarded-for': '203.0.113.99' },
+    headers: {
+      'x-forwarded-for': '203.0.113.99',
+      'x-vercel-forwarded-for': '203.0.113.44',
+      'x-real-ip': '203.0.113.44'
+    },
     socket: { remoteAddress: '::ffff:127.0.0.1' }
   };
 
   assert.equal(getClientIp(fakeReq, { trustProxy: false }), '127.0.0.1');
-  assert.equal(getClientIp(fakeReq, { trustProxy: true }), '198.51.100.77');
+  assert.equal(getClientIp(fakeReq, { trustProxy: 'vercel' }), '203.0.113.44');
+  assert.equal(getClientIp(fakeReq, { trustProxy: 1 }), '198.51.100.77');
 });
 
-test('frontend: HTML sem handlers inline, CSP compatível e validação sincronizada (8..128) em auth.js', async () => {
+test('frontend: HTML sem handlers inline, CSP compatível e validação sincronizada (15..128) em auth.js', async () => {
   for (const file of ['index.html', 'cadastro.html', 'dashboard.html', 'disciplinas.html', 'tarefas.html']) {
     const html = fs.readFileSync(path.join(ROOT, 'frontend', file), 'utf8');
     assert.doesNotMatch(html, /\sonclick\s*=/i, `${file} não deve conter onclick inline`);
@@ -152,14 +183,14 @@ test('frontend: HTML sem handlers inline, CSP compatível e validação sincroni
   }
 
   const cadastroHtml = fs.readFileSync(path.join(ROOT, 'frontend', 'cadastro.html'), 'utf8');
-  assert.match(cadastroHtml, /minlength="8"/);
+  assert.match(cadastroHtml, /minlength="15"/);
   assert.match(cadastroHtml, /maxlength="128"/);
 
   assert.equal(CONTENT_SECURITY_POLICY.includes("'unsafe-inline'"), false);
   assert.match(CONTENT_SECURITY_POLICY, /script-src 'self'/);
   assert.match(CONTENT_SECURITY_POLICY, /frame-ancestors 'none'/);
 
-  // Testa auth.js em sandbox garantindo rejeição local abaixo de 8 e acima de 128 caracteres
+  // Testa auth.js em sandbox garantindo rejeição local abaixo de 15 e acima de 128 caracteres
   const authSource = fs.readFileSync(path.join(ROOT, 'frontend', 'js', 'auth.js'), 'utf8');
   const listeners = new Map();
   const messageEl = { textContent: '', style: {}, setAttribute() {} };
@@ -177,7 +208,7 @@ test('frontend: HTML sem handlers inline, CSP compatível e validação sincroni
     },
     location: { replace() {} }
   };
-  const currentData = { name: 'Ana', email: 'ana@teste.local', password: '1234567' };
+  const currentData = { name: 'Ana', email: 'ana@teste.local', password: '12345678901234' };
   vm.runInNewContext(authSource, {
     window: windowObj,
     document: {
@@ -188,7 +219,7 @@ test('frontend: HTML sem handlers inline, CSP compatível e validação sincroni
 
   await listeners.get('submit')({ preventDefault() {} });
   assert.equal(apiCalls, 0);
-  assert.match(messageEl.textContent, /entre 8 e 128/i);
+  assert.match(messageEl.textContent, /entre 15 e 128/i);
 
   currentData.password = 'a'.repeat(129);
   await listeners.get('submit')({ preventDefault() {} });
@@ -244,11 +275,11 @@ test('SQLite isolado: sessões multi-instância, expiração, logout, rate limit
   }));
 
   try {
-    // Senhas fora dos limites na API
+    // Senhas fora dos limites na API (OWASP sem MFA: 15..128)
     assert.equal(
       (await rawRequest(instanceA.baseUrl, '/api/register', {
         method: 'POST',
-        body: { name: 'Ana', email: 'ana@sec.local', password: 'curta' }
+        body: { name: 'Ana', email: 'ana@sec.local', password: '14chars-curta!' }
       })).status,
       400
     );

@@ -11,15 +11,18 @@ const {
 const {
   resolveRateLimitConfig,
   resolveTrustProxy,
+  toExpressTrustProxy,
   getClientIp,
   consumeRateLimit,
   resetRateLimit,
   cleanupExpiredRateLimits
 } = require(path.join(__dirname, 'security', 'rate-limit'));
 const { applySecurityHeaders } = require(path.join(__dirname, 'security', 'headers'));
+const { scheduleBackgroundTask } = require(path.join(__dirname, 'security', 'background'));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const isVercel = process.env.VERCEL === '1';
 const MAX_PG_INT = 2147483647;
 const MAX_NAME_LENGTH = 120;
 const MAX_EMAIL_LENGTH = 254;
@@ -33,11 +36,16 @@ const rateLimitConfig = resolveRateLimitConfig(process.env);
 const trustProxy = resolveTrustProxy(process.env);
 
 if (typeof app.disable === 'function') app.disable('x-powered-by');
-if (typeof app.set === 'function') app.set('trust proxy', trustProxy);
+if (typeof app.set === 'function') {
+  app.set('trust proxy', toExpressTrustProxy(trustProxy));
+  app.set('query parser', 'simple');
+}
 
 app.use(applySecurityHeaders);
 app.use(express.json({ limit: '16kb' }));
-app.use(express.static(path.join(__dirname, '..', 'frontend')));
+if (!isVercel) {
+  app.use(express.static(path.join(__dirname, '..', 'frontend')));
+}
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -214,7 +222,7 @@ app.post('/api/register', async (req, res) => {
     }
 
     const passwordHash = await passwordManager.hashPassword(password);
-    cleanupExpiredRateLimits(db).catch(() => {});
+    scheduleBackgroundTask(cleanupExpiredRateLimits(db));
 
     db.run(
       'INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)',
@@ -300,8 +308,19 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
           }
 
+          if (passwordManager.needsRehash(user.password_hash)) {
+            try {
+              const upgradedHash = await passwordManager.upgradePasswordHash(password);
+              await new Promise((resolve) => {
+                db.run('UPDATE users SET password_hash = ? WHERE id = ?', [upgradedHash, user.id], () => resolve());
+              });
+            } catch {
+              // Se o upgrade oportunista falhar (ex.: CryptoBusyError), preserva a autenticacao valida.
+            }
+          }
+
           await resetRateLimit(db, { scope: 'login:acct', identifier: cleanEmail }).catch(() => {});
-          cleanupExpiredRateLimits(db).catch(() => {});
+          scheduleBackgroundTask(cleanupExpiredRateLimits(db));
 
           const session = await createSession(db, user.id, { ttlMs: sessionTtlMs });
           return res.json({
@@ -640,6 +659,9 @@ app.use('/api', (req, res) => {
 });
 
 app.get('*', (req, res) => {
+  if (isVercel) {
+    return res.redirect(302, '/index.html');
+  }
   res.sendFile(path.join(__dirname, '..', 'frontend', 'index.html'));
 });
 

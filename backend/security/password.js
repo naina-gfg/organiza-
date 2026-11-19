@@ -2,15 +2,16 @@
 
 const crypto = require('node:crypto');
 
-const MIN_PASSWORD_LENGTH = 8;
+// OWASP Authentication Cheat Sheet (sem MFA): minimo 15 caracteres; maximo >= 64 (128).
+const MIN_PASSWORD_LENGTH = 15;
 const MAX_PASSWORD_LENGTH = 128;
 
-// Parametros alinhados a OWASP Password Storage Cheat Sheet para scrypt em serverless:
-// N = 2^15 (32768), r = 8, p = 1 => ~32 MiB por operacao (~150 ms) e maxmem explicito de 64 MiB.
+// OWASP Password Storage Cheat Sheet para scrypt (tier equilibrado 32 MiB para serverless):
+// N = 2^15 (32768), r = 8 (1024 bytes), p = 3 => ~32 MiB por operacao (~550 ms) e maxmem 64 MiB.
 const SCRYPT_PARAMS = Object.freeze({
   N: 32768,
   r: 8,
-  p: 1,
+  p: 3,
   keylen: 32,
   saltBytes: 16,
   maxmem: 64 * 1024 * 1024
@@ -38,9 +39,37 @@ function parsePositiveBound(rawValue, fallback, min, max) {
   return parsed;
 }
 
+function parseScryptHash(storedHash) {
+  if (typeof storedHash !== 'string') return null;
+  const match = SCRYPT_HASH_REGEX.exec(storedHash);
+  if (!match) return null;
+
+  const N = Number(match[1]);
+  const r = Number(match[2]);
+  const p = Number(match[3]);
+  const isPowerOfTwo = N > 0 && (N & (N - 1)) === 0;
+  if (
+    !isPowerOfTwo ||
+    N < 16384 || N > 131072 ||
+    r < 1 || r > 16 ||
+    p < 1 || p > 8 ||
+    128 * N * r > 256 * 1024 * 1024
+  ) {
+    return null;
+  }
+
+  const salt = Buffer.from(match[4], 'base64url');
+  const expectedKey = Buffer.from(match[5], 'base64url');
+  if (salt.length < 16 || salt.length > 64 || expectedKey.length < 32 || expectedKey.length > 64) {
+    return null;
+  }
+
+  return { N, r, p, salt, expectedKey };
+}
+
 function createPasswordManager(env = process.env) {
   const maxConcurrent = parsePositiveBound(env.SCRYPT_MAX_CONCURRENT, 4, 1, 16);
-  const maxQueue = parsePositiveBound(env.SCRYPT_MAX_QUEUE, 24, 1, 200);
+  const maxQueue = parsePositiveBound(env.SCRYPT_MAX_QUEUE, 16, 1, 200);
 
   let activeCount = 0;
   const waitQueue = [];
@@ -98,14 +127,41 @@ function createPasswordManager(env = process.env) {
     return { valid: true };
   }
 
+  async function hashRawPassword(password) {
+    const salt = crypto.randomBytes(SCRYPT_PARAMS.saltBytes);
+    const derived = await deriveScrypt(password, salt, SCRYPT_PARAMS);
+    return `$scrypt$v=1$N=${SCRYPT_PARAMS.N},r=${SCRYPT_PARAMS.r},p=${SCRYPT_PARAMS.p}$${salt.toString('base64url')}$${derived.toString('base64url')}`;
+  }
+
   async function hashPassword(password) {
     const check = validatePasswordStrength(password);
     if (!check.valid) {
       throw new Error(check.error);
     }
-    const salt = crypto.randomBytes(SCRYPT_PARAMS.saltBytes);
-    const derived = await deriveScrypt(password, salt, SCRYPT_PARAMS);
-    return `$scrypt$v=1$N=${SCRYPT_PARAMS.N},r=${SCRYPT_PARAMS.r},p=${SCRYPT_PARAMS.p}$${salt.toString('base64url')}$${derived.toString('base64url')}`;
+    return hashRawPassword(password);
+  }
+
+  /**
+   * Atualiza um hash scrypt anteriormente emitido para os parametros atuais
+   * exclusivamente apos autenticacao valida, preservando contas existentes.
+   */
+  async function upgradePasswordHash(password) {
+    if (typeof password !== 'string' || password.length === 0 || password.length > MAX_PASSWORD_LENGTH) {
+      throw new Error('Senha invalida para atualizacao de hash.');
+    }
+    return hashRawPassword(password);
+  }
+
+  function needsRehash(storedHash) {
+    const parsed = parseScryptHash(storedHash);
+    if (!parsed) return false;
+    return (
+      parsed.N !== SCRYPT_PARAMS.N ||
+      parsed.r !== SCRYPT_PARAMS.r ||
+      parsed.p !== SCRYPT_PARAMS.p ||
+      parsed.salt.length !== SCRYPT_PARAMS.saltBytes ||
+      parsed.expectedKey.length !== SCRYPT_PARAMS.keylen
+    );
   }
 
   async function verifyDummyPassword() {
@@ -118,35 +174,13 @@ function createPasswordManager(env = process.env) {
     if (typeof password !== 'string' || password.length === 0 || password.length > MAX_PASSWORD_LENGTH) {
       return false;
     }
-    if (typeof storedHash !== 'string') {
+
+    const parsed = parseScryptHash(storedHash);
+    if (!parsed) {
       return verifyDummyPassword();
     }
 
-    const match = SCRYPT_HASH_REGEX.exec(storedHash);
-    if (!match) {
-      return verifyDummyPassword();
-    }
-
-    const N = Number(match[1]);
-    const r = Number(match[2]);
-    const p = Number(match[3]);
-    const isPowerOfTwo = N > 0 && (N & (N - 1)) === 0;
-    if (
-      !isPowerOfTwo ||
-      N < 16384 || N > 131072 ||
-      r < 1 || r > 16 ||
-      p < 1 || p > 8 ||
-      128 * N * r > 256 * 1024 * 1024
-    ) {
-      return verifyDummyPassword();
-    }
-
-    const salt = Buffer.from(match[4], 'base64url');
-    const expectedKey = Buffer.from(match[5], 'base64url');
-    if (salt.length < 16 || salt.length > 64 || expectedKey.length < 32 || expectedKey.length > 64) {
-      return verifyDummyPassword();
-    }
-
+    const { N, r, p, salt, expectedKey } = parsed;
     const maxmem = Math.max(SCRYPT_PARAMS.maxmem, 256 * N * r);
     const derived = await deriveScrypt(password, salt, {
       N,
@@ -177,6 +211,8 @@ function createPasswordManager(env = process.env) {
     SCRYPT_PARAMS,
     validatePasswordStrength,
     hashPassword,
+    upgradePasswordHash,
+    needsRehash,
     verifyPassword,
     verifyDummyPassword,
     getStats

@@ -115,6 +115,8 @@ const m001 = fs.readFileSync(path.join(ROOT, 'migrations', '001_initial_schema.s
 const m002 = fs.readFileSync(path.join(ROOT, 'migrations', '002_roles_and_rls.sql'), 'utf8');
 const m003 = fs.readFileSync(path.join(ROOT, 'migrations', '003_sessions_and_rate_limits.sql'), 'utf8');
 const m004 = fs.readFileSync(path.join(ROOT, 'migrations', '004_sessions_rls_and_grants.sql'), 'utf8');
+const m005 = fs.readFileSync(path.join(ROOT, 'migrations', '005_users_rehash_policy.sql'), 'utf8');
+const rb005 = fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '005_users_rehash_policy_down.sql'), 'utf8');
 const rb004 = fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '004_sessions_rls_and_grants_down.sql'), 'utf8');
 const rb003 = fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '003_sessions_and_rate_limits_down.sql'), 'utf8');
 const rb002 = fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '002_roles_and_rls_down.sql'), 'utf8');
@@ -172,6 +174,7 @@ test.before(async () => {
   await adminPool.query(m002);
   await adminPool.query(m003);
   await adminPool.query(m004);
+  await adminPool.query(m005);
   await adminPool.query(`ALTER ROLE organiza_app WITH LOGIN PASSWORD '${runtimePassword}'`);
 
   cluster = {
@@ -248,6 +251,7 @@ test('PostgreSQL 17: RLS, permissões mínimas e bloqueio público em sessions e
   try {
     await assert.rejects(() => runtimePool.query('TRUNCATE public.sessions'), (e) => e.code === '42501');
     await assert.rejects(() => runtimePool.query('DROP TABLE public.rate_limits'), (e) => e.code === '42501');
+    await assert.rejects(() => runtimePool.query("UPDATE public.users SET email = 'hack@pg.local' WHERE id = 1"), (e) => e.code === '42501');
   } finally {
     await runtimePool.end();
   }
@@ -289,7 +293,7 @@ test('PostgreSQL 17: scrypt, sessões entre duas instâncias, reinicialização,
       ['mariana@pgsec.local', 'mariana2@pgsec.local']
     );
     assert.notEqual(userRows.rows[0].password_hash, userRows.rows[1].password_hash);
-    assert.match(userRows.rows[0].password_hash, /^\$scrypt\$v=1\$/);
+    assert.match(userRows.rows[0].password_hash, /^\$scrypt\$v=1\$N=32768,r=8,p=3\$/);
     assert.equal(userRows.rows[0].password_hash.includes('PgPassword!2026'), false);
 
     // Rate limit de cadastro (terceiro permitido, quarto bloqueado)
@@ -491,6 +495,7 @@ test('PostgreSQL 17: rollback completo das migrations 004, 003, 002 e 001 e reap
     await rbPool.query(m002);
     await rbPool.query(m003);
     await rbPool.query(m004);
+    await rbPool.query(m005);
 
     const anonPrivs = await rbPool.query(`
       SELECT table_name
@@ -501,6 +506,7 @@ test('PostgreSQL 17: rollback completo das migrations 004, 003, 002 e 001 e reap
     `);
     assert.equal(anonPrivs.rows.length, 0);
 
+    await rbPool.query(rb005);
     await rbPool.query(rb004);
     await rbPool.query(rb003);
     await rbPool.query(rb002);
@@ -513,11 +519,12 @@ test('PostgreSQL 17: rollback completo das migrations 004, 003, 002 e 001 e reap
     `);
     assert.equal(left.rows.length, 0);
 
-    // Reaplica 001..004 para comprovar integridade idempotente
+    // Reaplica 001..005 para comprovar integridade idempotente
     await rbPool.query(m001);
     await rbPool.query(m002);
     await rbPool.query(m003);
     await rbPool.query(m004);
+    await rbPool.query(m005);
   } finally {
     await rbPool.end();
   }

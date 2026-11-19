@@ -24,8 +24,8 @@
       const email = String(data.get('email') || '').trim();
       const password = String(data.get('password') || '');
 
-      if (!name || name.length > 120 || !email || email.length > 254 || password.length < 8 || password.length > 128) {
-        api.showMessage(messageElement, 'Informe nome, e-mail válido e senha entre 8 e 128 caracteres.', true);
+      if (!name || name.length > 120 || !email || email.length > 254 || password.length < 15 || password.length > 128) {
+        api.showMessage(messageElement, 'Informe nome, e-mail válido e senha entre 15 e 128 caracteres.', true);
         return;
       }
 

@@ -1,7 +1,11 @@
-# Arquivos versionados apenas para testes e documentacao (nao necessarios ao runtime de deploy)
+# Arquivos versionados apenas para testes, migrations manuais e documentacao
 tests/
+migrations/
 README.md
 *.md
+
+# Diretorio gerado no build (recriado pelo buildCommand na Vercel)
+public/
 
 # Dependencias locais, git e configuracoes locais
 node_modules/

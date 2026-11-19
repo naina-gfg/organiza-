@@ -103,6 +103,7 @@ const migration001 = fs.readFileSync(path.join(ROOT, 'migrations', '001_initial_
 const migration002 = fs.readFileSync(path.join(ROOT, 'migrations', '002_roles_and_rls.sql'), 'utf8');
 const migration003 = fs.readFileSync(path.join(ROOT, 'migrations', '003_sessions_and_rate_limits.sql'), 'utf8');
 const migration004 = fs.readFileSync(path.join(ROOT, 'migrations', '004_sessions_rls_and_grants.sql'), 'utf8');
+const migration005 = fs.readFileSync(path.join(ROOT, 'migrations', '005_users_rehash_policy.sql'), 'utf8');
 const rollback002 = fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '002_roles_and_rls_down.sql'), 'utf8');
 const rollback001 = fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '001_initial_schema_down.sql'), 'utf8');
 
@@ -159,6 +160,7 @@ async function setupEphemeralPostgres() {
   await adminPool.query(migration002);
   await adminPool.query(migration003);
   await adminPool.query(migration004);
+  await adminPool.query(migration005);
   await adminPool.query(`ALTER ROLE organiza_app WITH LOGIN PASSWORD '${runtimePassword}'`);
 
   const runtimeDatabaseUrl = `postgresql://organiza_app:${runtimePassword}@127.0.0.1:${port}/organiza_test`;
@@ -531,20 +533,20 @@ test('Equivalência completa SQLite × PostgreSQL: ordenação com prazos nulos,
   async function runIdenticalScenario(baseUrl) {
     await apiJson(baseUrl, '/api/register', {
       method: 'POST',
-      body: { name: 'Equiv Um', email: 'equiv1@teste.local', password: 'equiv-password' }
+      body: { name: 'Equiv Um', email: 'equiv1@teste.local', password: 'equiv-password-1' }
     });
     await apiJson(baseUrl, '/api/register', {
       method: 'POST',
-      body: { name: 'Equiv Dois', email: 'equiv2@teste.local', password: 'equiv-password' }
+      body: { name: 'Equiv Dois', email: 'equiv2@teste.local', password: 'equiv-password-1' }
     });
 
     const u1 = (await apiJson(baseUrl, '/api/login', {
       method: 'POST',
-      body: { email: 'equiv1@teste.local', password: 'equiv-password' }
+      body: { email: 'equiv1@teste.local', password: 'equiv-password-1' }
     })).body.token;
     const u2 = (await apiJson(baseUrl, '/api/login', {
       method: 'POST',
-      body: { email: 'equiv2@teste.local', password: 'equiv-password' }
+      body: { email: 'equiv2@teste.local', password: 'equiv-password-1' }
     })).body.token;
 
     const dMat = (await apiJson(baseUrl, '/api/disciplines', {

@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { scheduleBackgroundTask } = require('./background');
 
 // Expiracao padrao absoluta: 8 horas
 const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -75,8 +76,8 @@ async function createSession(db, userId, { ttlMs = DEFAULT_SESSION_TTL_MS, nowMs
     [userId, tokenHash, expiresAt]
   );
 
-  // Limpeza controlada em segundo plano sem falhar criacao caso ja esteja em andamento
-  cleanupExpiredSessions(db, { nowMs }).catch(() => {});
+  // Limpeza controlada via waitUntil (Vercel) / promessa protegida local
+  scheduleBackgroundTask(cleanupExpiredSessions(db, { nowMs }));
 
   return { token, expiresAt };
 }

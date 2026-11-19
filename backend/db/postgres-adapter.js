@@ -1,6 +1,7 @@
 'use strict';
 
 const { Pool } = require('pg');
+const { attachDatabasePool } = require('@vercel/functions');
 const { sanitizeErrorMessage } = require('./config');
 const { translateSqlToPostgres } = require('./sql-compat');
 
@@ -45,6 +46,15 @@ function extractLastId(translated, result) {
 
 function createPostgresAdapter(postgresConfig, PoolImpl = Pool) {
   const pool = new PoolImpl(postgresConfig.poolConfig);
+
+  if (
+    pool &&
+    typeof pool.on === 'function' &&
+    pool.options &&
+    'idleTimeoutMillis' in pool.options
+  ) {
+    attachDatabasePool(pool);
+  }
 
   pool.on('error', (err) => {
     console.error('[db:postgres] Erro em cliente ocioso do pool:', sanitizeErrorMessage(err));

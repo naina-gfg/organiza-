@@ -5,8 +5,10 @@ const path = require('node:path');
 const { sanitizeErrorMessage } = require('./config');
 
 const SQLITE_MIGRATIONS_DIR = path.resolve(__dirname, '..', '..', 'migrations', 'sqlite');
-const SQLITE_MIGRATION_001 = fs.readFileSync(path.join(SQLITE_MIGRATIONS_DIR, '001_initial_schema.sql'), 'utf8');
-const SQLITE_MIGRATION_002 = fs.readFileSync(path.join(SQLITE_MIGRATIONS_DIR, '002_sessions_and_rate_limits.sql'), 'utf8');
+
+function readSqliteMigration(filename) {
+  return fs.readFileSync(path.join(SQLITE_MIGRATIONS_DIR, filename), 'utf8');
+}
 
 function normalizeArgs(params, cb) {
   if (typeof params === 'function') {
@@ -46,8 +48,11 @@ function allRaw(rawDb, sql, params = []) {
 }
 
 async function initializeSqliteSchema(rawDb) {
+  const migration001 = readSqliteMigration('001_initial_schema.sql');
+  const migration002 = readSqliteMigration('002_sessions_and_rate_limits.sql');
+
   await runRaw(rawDb, 'PRAGMA busy_timeout = 5000');
-  await execRaw(rawDb, SQLITE_MIGRATION_001);
+  await execRaw(rawDb, migration001);
 
   // Atualiza bancos SQLite legados que ainda nao possuam ON DELETE SET NULL em tasks.discipline_id
   const fkList = await allRaw(rawDb, "PRAGMA foreign_key_list('tasks')");
@@ -100,10 +105,10 @@ async function initializeSqliteSchema(rawDb) {
       await runRaw(rawDb, 'ROLLBACK').catch(() => {});
       throw err;
     }
-    await execRaw(rawDb, SQLITE_MIGRATION_001);
+    await execRaw(rawDb, migration001);
   }
 
-  await execRaw(rawDb, SQLITE_MIGRATION_002);
+  await execRaw(rawDb, migration002);
   await runRaw(rawDb, 'PRAGMA foreign_keys = ON');
 }
 
