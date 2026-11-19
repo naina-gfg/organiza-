@@ -6,12 +6,44 @@ const db = require('./database');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const sessions = new Map();
+const MAX_PG_INT = 2147483647;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
 function hashPassword(password) {
   return crypto.createHash('sha256').update(password).digest('hex');
+}
+
+function parsePositiveId(rawId) {
+  if (typeof rawId === 'number') {
+    return Number.isSafeInteger(rawId) && rawId > 0 && rawId <= MAX_PG_INT ? rawId : null;
+  }
+  if (typeof rawId !== 'string') return null;
+  const trimmed = rawId.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= MAX_PG_INT ? parsed : null;
+}
+
+function isUniqueConstraintError(err) {
+  return Boolean(
+    err &&
+    (err.code === '23505' ||
+      (typeof err.message === 'string' && err.message.includes('UNIQUE')))
+  );
+}
+
+function isForeignKeyError(err) {
+  return Boolean(
+    err &&
+    (err.code === '23503' ||
+      err.code === 'SQLITE_CONSTRAINT_FOREIGNKEY' ||
+      err.code === 'SQLITE_CONSTRAINT_TRIGGER' ||
+      (typeof err.message === 'string' &&
+        (err.message.includes('FOREIGN KEY constraint failed') ||
+          err.message.includes('CROSS_USER_DISCIPLINE'))))
+  );
 }
 
 function auth(req, res, next) {
@@ -28,8 +60,12 @@ function auth(req, res, next) {
 }
 
 app.post('/api/register', (req, res) => {
-  const { name, email, password } = req.body;
-  if (!name || !email || !password) {
+  const { name, email, password } = req.body || {};
+  if (
+    typeof name !== 'string' || !name.trim() ||
+    typeof email !== 'string' || !email.trim() ||
+    typeof password !== 'string' || !password
+  ) {
     return res.status(400).json({ error: 'Preencha nome, e-mail e senha.' });
   }
 
@@ -39,7 +75,7 @@ app.post('/api/register', (req, res) => {
     [name.trim(), email.trim().toLowerCase(), passwordHash],
     function (err) {
       if (err) {
-        if (err.message.includes('UNIQUE')) {
+        if (isUniqueConstraintError(err)) {
           return res.status(409).json({ error: 'Este e-mail já está cadastrado.' });
         }
         return res.status(500).json({ error: 'Erro ao cadastrar usuário.' });
@@ -50,8 +86,11 @@ app.post('/api/register', (req, res) => {
 });
 
 app.post('/api/login', (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
+  const { email, password } = req.body || {};
+  if (
+    typeof email !== 'string' || !email.trim() ||
+    typeof password !== 'string' || !password
+  ) {
     return res.status(400).json({ error: 'Informe e-mail e senha.' });
   }
 
@@ -84,9 +123,9 @@ app.get('/api/dashboard', auth, (req, res) => {
   db.all(
     `WITH task_metrics AS (
        SELECT
-         COUNT(*) AS total,
-         SUM(CASE WHEN status = 'Concluída' THEN 1 ELSE 0 END) AS completed,
-         SUM(CASE WHEN status = 'Pendente' THEN 1 ELSE 0 END) AS pending
+         CAST(COUNT(*) AS INTEGER) AS total,
+         CAST(COALESCE(SUM(CASE WHEN status = 'Concluída' THEN 1 ELSE 0 END), 0) AS INTEGER) AS completed,
+         CAST(COALESCE(SUM(CASE WHEN status = 'Pendente' THEN 1 ELSE 0 END), 0) AS INTEGER) AS pending
        FROM tasks WHERE user_id = ?
      )
      SELECT
@@ -106,24 +145,26 @@ app.get('/api/dashboard', auth, (req, res) => {
      ORDER BY
        CASE t.status WHEN 'Pendente' THEN 0 ELSE 1 END,
        CASE t.priority WHEN 'Alta' THEN 0 WHEN 'Média' THEN 1 ELSE 2 END,
-       t.due_date`,
+       CASE WHEN t.due_date IS NULL THEN 0 ELSE 1 END,
+       t.due_date ASC,
+       t.id ASC`,
     [req.userId, req.userId],
     (err, rows) => {
       if (err) return res.status(500).json({ error: 'Erro ao carregar dashboard.' });
-      const row = rows[0];
-      const total = row.total || 0;
-      const completed = row.completed || 0;
-      const pending = row.pending || 0;
-      const productivity = total ? Math.round((completed / total) * 100) : 0;
+      const row = rows[0] || {};
+      const total = Number(row.total ?? 0);
+      const completed = Number(row.completed ?? 0);
+      const pending = Number(row.pending ?? 0);
+      const productivity = total > 0 ? Math.round((completed / total) * 100) : 0;
       const tasks = rows
-        .filter(item => item.id !== null)
+        .filter(item => item.id !== null && item.id !== undefined)
         .map(item => ({
-          id: item.id,
+          id: Number(item.id),
           title: item.title,
           status: item.status,
           priority: item.priority,
           due_date: item.due_date,
-          discipline_id: item.discipline_id,
+          discipline_id: item.discipline_id == null ? null : Number(item.discipline_id),
           discipline_name: item.discipline_name
         }));
       res.json({ total, completed, pending, productivity, tasks });
@@ -133,7 +174,7 @@ app.get('/api/dashboard', auth, (req, res) => {
 
 app.get('/api/disciplines', auth, (req, res) => {
   db.all(
-    'SELECT id, name, created_at FROM disciplines WHERE user_id = ? ORDER BY name',
+    'SELECT id, name, created_at FROM disciplines WHERE user_id = ? ORDER BY name, id ASC',
     [req.userId],
     (err, rows) => {
       if (err) return res.status(500).json({ error: 'Erro ao listar disciplinas.' });
@@ -143,8 +184,8 @@ app.get('/api/disciplines', auth, (req, res) => {
 });
 
 app.post('/api/disciplines', auth, (req, res) => {
-  const { name } = req.body;
-  if (!name || !name.trim()) {
+  const { name } = req.body || {};
+  if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Informe o nome da disciplina.' });
   }
 
@@ -159,11 +200,19 @@ app.post('/api/disciplines', auth, (req, res) => {
 });
 
 app.delete('/api/disciplines/:id', auth, (req, res) => {
+  const disciplineId = parsePositiveId(req.params.id);
+  if (!disciplineId) {
+    return res.status(400).json({ error: 'ID da disciplina inválido.' });
+  }
+
   db.run(
     'DELETE FROM disciplines WHERE id = ? AND user_id = ?',
-    [req.params.id, req.userId],
+    [disciplineId, req.userId],
     function (err) {
       if (err) return res.status(500).json({ error: 'Erro ao excluir disciplina.' });
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Disciplina não encontrada.' });
+      }
       res.json({ message: 'Disciplina excluída.' });
     }
   );
@@ -178,7 +227,9 @@ app.get('/api/tasks', auth, (req, res) => {
      ORDER BY
        CASE t.status WHEN 'Pendente' THEN 0 ELSE 1 END,
        CASE t.priority WHEN 'Alta' THEN 0 WHEN 'Média' THEN 1 ELSE 2 END,
-       t.due_date`,
+       CASE WHEN t.due_date IS NULL THEN 0 ELSE 1 END,
+       t.due_date ASC,
+       t.id ASC`,
     [req.userId],
     (err, rows) => {
       if (err) return res.status(500).json({ error: 'Erro ao listar tarefas.' });
@@ -188,7 +239,7 @@ app.get('/api/tasks', auth, (req, res) => {
 });
 
 app.post('/api/tasks', auth, (req, res) => {
-  const { title, description, discipline_id, due_date, priority } = req.body;
+  const { title, description, discipline_id, due_date, priority } = req.body || {};
   if (typeof title !== 'string' || !title.trim()) {
     return res.status(400).json({ error: 'Informe o título da tarefa.' });
   }
@@ -208,7 +259,12 @@ app.post('/api/tasks', auth, (req, res) => {
         priority || 'Média'
       ],
       function (err) {
-        if (err) return res.status(500).json({ error: 'Erro ao cadastrar tarefa.' });
+        if (err) {
+          if (isForeignKeyError(err)) {
+            return res.status(404).json({ error: 'Disciplina não encontrada para este usuário.' });
+          }
+          return res.status(500).json({ error: 'Erro ao cadastrar tarefa.' });
+        }
         res.status(201).json({ id: this.lastID, message: 'Tarefa cadastrada.' });
       }
     );
@@ -220,8 +276,8 @@ app.post('/api/tasks', auth, (req, res) => {
   if (typeof discipline_id !== 'number' && typeof discipline_id !== 'string') {
     return res.status(400).json({ error: 'Disciplina inválida.' });
   }
-  const selectedDisciplineId = Number(discipline_id);
-  if (!Number.isSafeInteger(selectedDisciplineId) || selectedDisciplineId <= 0) {
+  const selectedDisciplineId = parsePositiveId(discipline_id);
+  if (!selectedDisciplineId) {
     return res.status(400).json({ error: 'Disciplina inválida.' });
   }
 
@@ -241,9 +297,9 @@ app.post('/api/tasks', auth, (req, res) => {
 
 /* FUNC-02 - Edicao completa de tarefas */
 app.put('/api/tasks/:id', auth, (req, res) => {
-  const taskId = Number(req.params.id);
+  const taskId = parsePositiveId(req.params.id);
 
-  if (!Number.isSafeInteger(taskId) || taskId <= 0) {
+  if (!taskId) {
     return res.status(400).json({ error: 'ID da tarefa invalido.' });
   }
 
@@ -286,9 +342,9 @@ app.put('/api/tasks/:id', auth, (req, res) => {
       return res.status(400).json({ error: 'Disciplina invalida.' });
     }
 
-    disciplineId = Number(discipline_id);
+    disciplineId = parsePositiveId(discipline_id);
 
-    if (!Number.isSafeInteger(disciplineId) || disciplineId <= 0) {
+    if (!disciplineId) {
       return res.status(400).json({ error: 'Disciplina invalida.' });
     }
   }
@@ -317,6 +373,11 @@ app.put('/api/tasks/:id', auth, (req, res) => {
           ],
           function (updateError) {
             if (updateError) {
+              if (isForeignKeyError(updateError)) {
+                return res.status(404).json({
+                  error: 'Disciplina nao encontrada para este usuario.'
+                });
+              }
               return res.status(500).json({ error: 'Erro ao atualizar tarefa.' });
             }
 
@@ -355,27 +416,43 @@ app.put('/api/tasks/:id', auth, (req, res) => {
 });
 
 app.patch('/api/tasks/:id/status', auth, (req, res) => {
-  const { status } = req.body;
+  const taskId = parsePositiveId(req.params.id);
+  if (!taskId) {
+    return res.status(400).json({ error: 'ID da tarefa inválido.' });
+  }
+
+  const { status } = req.body || {};
   if (!['Pendente', 'Concluída'].includes(status)) {
     return res.status(400).json({ error: 'Status inválido.' });
   }
 
   db.run(
     'UPDATE tasks SET status = ? WHERE id = ? AND user_id = ?',
-    [status, req.params.id, req.userId],
+    [status, taskId, req.userId],
     function (err) {
       if (err) return res.status(500).json({ error: 'Erro ao atualizar tarefa.' });
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Tarefa não encontrada.' });
+      }
       res.json({ message: 'Status atualizado.' });
     }
   );
 });
 
 app.delete('/api/tasks/:id', auth, (req, res) => {
+  const taskId = parsePositiveId(req.params.id);
+  if (!taskId) {
+    return res.status(400).json({ error: 'ID da tarefa inválido.' });
+  }
+
   db.run(
     'DELETE FROM tasks WHERE id = ? AND user_id = ?',
-    [req.params.id, req.userId],
+    [taskId, req.userId],
     function (err) {
       if (err) return res.status(500).json({ error: 'Erro ao excluir tarefa.' });
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Tarefa não encontrada.' });
+      }
       res.json({ message: 'Tarefa excluída.' });
     }
   );
@@ -385,6 +462,15 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'frontend', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`Servidor iniciado em http://localhost:${PORT}`);
-});
+app.db = db;
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = app;
+}
+
+const runningInTestVm = typeof module === 'undefined';
+if (runningInTestVm || require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Servidor iniciado em http://localhost:${PORT}`);
+  });
+}
