@@ -1,6 +1,8 @@
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const db = require('./database');
+const { sanitizeErrorMessage } = require(path.join(__dirname, 'db', 'config'));
 const { createPasswordManager, CryptoBusyError } = require(path.join(__dirname, 'security', 'password'));
 const {
   resolveSessionTtlMs,
@@ -23,6 +25,7 @@ const { scheduleBackgroundTask } = require(path.join(__dirname, 'security', 'bac
 const app = express();
 const PORT = process.env.PORT || 3000;
 const isVercel = process.env.VERCEL === '1';
+const isRealVercel = Boolean(process.env.VERCEL_ENV);
 const MAX_PG_INT = 2147483647;
 const MAX_NAME_LENGTH = 120;
 const MAX_EMAIL_LENGTH = 254;
@@ -43,8 +46,15 @@ if (typeof app.set === 'function') {
 
 app.use(applySecurityHeaders);
 app.use(express.json({ limit: '16kb' }));
-if (!isVercel) {
-  app.use(express.static(path.join(__dirname, '..', 'frontend')));
+
+// Servimento de arquivos estaticos: localmente e no runtime real da Vercel
+const publicDir = path.join(__dirname, '..', 'public');
+const frontendDir = path.join(__dirname, '..', 'frontend');
+if (!isVercel || isRealVercel) {
+  if (fs.existsSync(publicDir)) {
+    app.use(express.static(publicDir));
+  }
+  app.use(express.static(frontendDir));
 }
 
 function isPlainObject(value) {
@@ -153,6 +163,7 @@ function handleCryptoError(err, res, fallbackMessage) {
     res.setHeader('Retry-After', String(err.retryAfterSeconds || 2));
     return res.status(503).json({ error: err.message });
   }
+  console.error('[server error]:', sanitizeErrorMessage(err));
   return res.status(500).json({ error: fallbackMessage });
 }
 
@@ -170,7 +181,8 @@ async function auth(req, res, next) {
     req.sessionId = session.sessionId;
     req.tokenHash = session.tokenHash;
     next();
-  } catch {
+  } catch (err) {
+    console.error('[auth error]:', sanitizeErrorMessage(err));
     return res.status(500).json({ error: 'Erro ao validar sessão.' });
   }
 }
@@ -659,10 +671,13 @@ app.use('/api', (req, res) => {
 });
 
 app.get('*', (req, res) => {
-  if (isVercel) {
+  if (isVercel && !isRealVercel) {
     return res.redirect(302, '/index.html');
   }
-  res.sendFile(path.join(__dirname, '..', 'frontend', 'index.html'));
+  const publicIndex = path.join(__dirname, '..', 'public', 'index.html');
+  const frontendIndex = path.join(__dirname, '..', 'frontend', 'index.html');
+  const targetIndex = fs.existsSync(publicIndex) ? publicIndex : frontendIndex;
+  res.sendFile(targetIndex);
 });
 
 app.use((err, req, res, next) => {
