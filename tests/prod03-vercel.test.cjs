@@ -1336,3 +1336,47 @@ test('PROD-03 Migration 005 rollback: revoga GRANT UPDATE (password_hash) e remo
     await rbPortDb.end();
   }
 });
+
+test('protótipo RLS fecha ausência de contexto e não vaza identidade ao reutilizar pool', async () => {
+  const { withUserTransaction } = require('../security-proposals/rls-transaction.cjs');
+  await tlsCluster.adminDefaultPool.query('CREATE DATABASE organiza_rls_draft');
+  const admin = new Pool({
+    host: '127.0.0.1', port: tlsCluster.port, user: 'postgres', database: 'organiza_rls_draft',
+    ssl: { ca: tlsCluster.certPem, rejectUnauthorized: true }
+  });
+  const runtime = new Pool({
+    host: '127.0.0.1', port: tlsCluster.port, user: 'organiza_app',
+    password: tlsCluster.runtimePassword, database: 'organiza_rls_draft', max: 1,
+    ssl: { ca: tlsCluster.certPem, rejectUnauthorized: true }
+  });
+  try {
+    await admin.query(m001);
+    await admin.query(m002);
+    const users = await admin.query("INSERT INTO public.users (name, email, password_hash) VALUES ('A','a@rls.test','dummy'), ('B','b@rls.test','dummy') RETURNING id");
+    const [a, b] = users.rows.map(row => row.id);
+    await admin.query("INSERT INTO public.disciplines (user_id, name) VALUES ($1, 'A'), ($2, 'B')", [a, b]);
+    await admin.query("INSERT INTO public.tasks (user_id, title) VALUES ($1, 'A'), ($2, 'B')", [a, b]);
+    await admin.query(fs.readFileSync(path.join(ROOT, 'security-proposals', 'rls-domain-draft.sql'), 'utf8'));
+
+    assert.equal((await runtime.query('SELECT id FROM public.tasks')).rowCount, 0);
+    await assert.rejects(() => runtime.query("INSERT INTO public.tasks (user_id, title) VALUES ($1, 'sem contexto')", [a]), { code: '42501' });
+    const visibleA = await withUserTransaction(runtime, a, c => c.query('SELECT user_id FROM public.tasks'));
+    assert.deepEqual(visibleA.rows.map(row => row.user_id), [a]);
+    const visibleB = await withUserTransaction(runtime, b, c => c.query('SELECT user_id FROM public.disciplines'));
+    assert.deepEqual(visibleB.rows.map(row => row.user_id), [b]);
+    assert.equal((await runtime.query('SELECT id FROM public.disciplines')).rowCount, 0);
+    const changed = await withUserTransaction(runtime, a, c => c.query("UPDATE public.tasks SET title = 'indevida' WHERE user_id = $1", [b]));
+    assert.equal(changed.rowCount, 0);
+    await assert.rejects(() => withUserTransaction(runtime, a, c => c.query("INSERT INTO public.tasks (user_id, title) VALUES ($1, 'indevida')", [b])), { code: '42501' });
+    await assert.rejects(() => withUserTransaction(runtime, a, async c => {
+      await c.query("INSERT INTO public.tasks (user_id, title) VALUES ($1, 'rollback')", [a]);
+      throw new Error('falha simulada');
+    }), /falha simulada/);
+    assert.equal((await withUserTransaction(runtime, a, c => c.query('SELECT id FROM public.tasks'))).rowCount, 1);
+    assert.equal((await runtime.query('SELECT id FROM public.tasks')).rowCount, 0);
+    await assert.rejects(() => withUserTransaction(runtime, 0, () => {}), /Identidade/);
+  } finally {
+    await runtime.end();
+    await admin.end();
+  }
+});
