@@ -1,6 +1,7 @@
 'use strict';
 
 const { Pool } = require('pg');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { attachDatabasePool } = require('@vercel/functions');
 const { sanitizeErrorMessage } = require('./config');
 const { translateSqlToPostgres } = require('./sql-compat');
@@ -46,6 +47,7 @@ function extractLastId(translated, result) {
 
 function createPostgresAdapter(postgresConfig, PoolImpl = Pool) {
   const pool = new PoolImpl(postgresConfig.poolConfig);
+  const identity = new AsyncLocalStorage();
 
   if (
     pool &&
@@ -63,7 +65,31 @@ function createPostgresAdapter(postgresConfig, PoolImpl = Pool) {
   async function executeQuery(sql, args, { forRun = false } = {}) {
     const translated = translateSqlToPostgres(sql, { forRun });
     // Executa sem nome de prepared statement para manter compatibilidade com Supabase Transaction Pooler
-    const result = await pool.query(translated.text, args);
+    const context = identity.getStore();
+    const client = await pool.connect();
+    let discard = false;
+    let result;
+    try {
+      await client.query('BEGIN');
+      // Zera TODOS os contextos por transacao, inclusive em operacoes anonimas.
+      // Isto evita herdar valores de uma conexao previamente contaminada.
+      const valueFor = (key) => context && context.key === key ? context.value : '';
+      await client.query(
+        `SELECT set_config('app.current_user_id', $1, true),
+                set_config('app.lookup_email', $2, true),
+                set_config('app.session_token_hash', $3, true),
+                set_config('app.session_cleanup', $4, true)`,
+        [valueFor('app.current_user_id'), valueFor('app.lookup_email'),
+          valueFor('app.session_token_hash'), valueFor('app.session_cleanup')]
+      );
+      result = await client.query(translated.text, args);
+      await client.query('COMMIT');
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch { discard = true; }
+      throw error;
+    } finally {
+      client.release(discard);
+    }
     return { translated, result };
   }
 
@@ -71,6 +97,33 @@ function createPostgresAdapter(postgresConfig, PoolImpl = Pool) {
     dialect: 'postgres',
     safeTarget: postgresConfig.safeTarget,
     pool,
+
+    withUserContext(userId, operation) {
+      if (!Number.isSafeInteger(userId) || userId <= 0 || userId > 2147483647) {
+        throw new TypeError('Identidade de usuario invalida.');
+      }
+      if (typeof operation !== 'function') throw new TypeError('Operacao invalida.');
+      return identity.run({ key: 'app.current_user_id', value: String(userId) }, operation);
+    },
+
+    withEmailContext(email, operation) {
+      if (typeof email !== 'string' || !email || email.length > 254 || typeof operation !== 'function') {
+        throw new TypeError('Contexto de e-mail invalido.');
+      }
+      return identity.run({ key: 'app.lookup_email', value: email }, operation);
+    },
+
+    withTokenContext(tokenHash, operation) {
+      if (typeof tokenHash !== 'string' || !/^[a-f0-9]{64}$/.test(tokenHash) || typeof operation !== 'function') {
+        throw new TypeError('Contexto de sessao invalido.');
+      }
+      return identity.run({ key: 'app.session_token_hash', value: tokenHash }, operation);
+    },
+
+    withSessionCleanup(operation) {
+      if (typeof operation !== 'function') throw new TypeError('Operacao invalida.');
+      return identity.run({ key: 'app.session_cleanup', value: '1' }, operation);
+    },
 
     async ready() {
       await pool.query('SELECT 1');

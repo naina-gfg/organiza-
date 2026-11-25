@@ -116,11 +116,16 @@ test('proteção de senhas: scrypt assíncrono gera hashes distintos, versionado
   assert.equal(await pm.verifyPassword('SenhaForte#2026', legacySha), false);
   assert.equal(await pm.verifyPassword('SenhaForte#2026', '$scrypt$v=1$N=16,r=8,p=1$abc$def'), false);
 
-  // Limite de tamanho OWASP sem MFA (15..128)
-  assert.equal(pm.validatePasswordStrength('12345678901234').valid, false);
+  // Limites de cadastro e compatibilidade com senhas existentes.
+  assert.equal(pm.validatePasswordStrength('12345').valid, false);
   assert.equal(pm.validatePasswordStrength('a'.repeat(129)).valid, false);
-  assert.equal(pm.validatePasswordStrength('123456789012345').valid, true);
-  await assert.rejects(() => pm.hashPassword('curta14chars!!'), /entre 15 e 128/i);
+  assert.equal(pm.validatePasswordStrength('123456').valid, true);
+  assert.equal(pm.validatePasswordStrength('abc123').valid, true);
+  assert.equal(pm.validatePasswordStrength('a'.repeat(128)).valid, true);
+  await assert.rejects(() => pm.hashPassword('12345'), /entre 6 e 128/i);
+  const numericHash = await pm.hashPassword('123456');
+  assert.equal(await pm.verifyPassword('123456', numericHash), true);
+  assert.equal(await pm.verifyPassword('123457', numericHash), false);
 });
 
 test('limitação de concorrência criptográfica do scrypt protege fila sob rajada', async () => {
@@ -175,7 +180,7 @@ test('proxy confiável: rejeita TRUST_PROXY=true, normaliza IPv4/IPv6 e ignora s
   assert.equal(getClientIp(fakeReq, { trustProxy: 1 }), '198.51.100.77');
 });
 
-test('frontend: HTML sem handlers inline, CSP compatível e validação sincronizada (15..128) em auth.js', async () => {
+test('frontend: HTML sem handlers inline, CSP compatível e validação sincronizada (6..128) em auth.js', async () => {
   for (const file of ['index.html', 'cadastro.html', 'dashboard.html', 'disciplinas.html', 'tarefas.html']) {
     const html = fs.readFileSync(path.join(ROOT, 'frontend', file), 'utf8');
     assert.doesNotMatch(html, /\sonclick\s*=/i, `${file} não deve conter onclick inline`);
@@ -183,14 +188,14 @@ test('frontend: HTML sem handlers inline, CSP compatível e validação sincroni
   }
 
   const cadastroHtml = fs.readFileSync(path.join(ROOT, 'frontend', 'cadastro.html'), 'utf8');
-  assert.match(cadastroHtml, /minlength="15"/);
+  assert.match(cadastroHtml, /minlength="6"/);
   assert.match(cadastroHtml, /maxlength="128"/);
 
   assert.equal(CONTENT_SECURITY_POLICY.includes("'unsafe-inline'"), false);
   assert.match(CONTENT_SECURITY_POLICY, /script-src 'self'/);
   assert.match(CONTENT_SECURITY_POLICY, /frame-ancestors 'none'/);
 
-  // Testa auth.js em sandbox garantindo rejeição local abaixo de 15 e acima de 128 caracteres
+  // Testa auth.js em sandbox garantindo rejeição local abaixo de 6 e acima de 128 caracteres
   const authSource = fs.readFileSync(path.join(ROOT, 'frontend', 'js', 'auth.js'), 'utf8');
   const listeners = new Map();
   const messageEl = { textContent: '', style: {}, setAttribute() {} };
@@ -208,7 +213,7 @@ test('frontend: HTML sem handlers inline, CSP compatível e validação sincroni
     },
     location: { replace() {} }
   };
-  const currentData = { name: 'Ana', email: 'ana@teste.local', password: '12345678901234' };
+  const currentData = { name: 'Ana', email: 'ana@teste.local', password: '12345' };
   vm.runInNewContext(authSource, {
     window: windowObj,
     document: {
@@ -219,7 +224,7 @@ test('frontend: HTML sem handlers inline, CSP compatível e validação sincroni
 
   await listeners.get('submit')({ preventDefault() {} });
   assert.equal(apiCalls, 0);
-  assert.match(messageEl.textContent, /entre 15 e 128/i);
+  assert.match(messageEl.textContent, /entre 6 e 128/i);
 
   currentData.password = 'a'.repeat(129);
   await listeners.get('submit')({ preventDefault() {} });
@@ -275,11 +280,11 @@ test('SQLite isolado: sessões multi-instância, expiração, logout, rate limit
   }));
 
   try {
-    // Senhas fora dos limites na API (OWASP sem MFA: 15..128)
+    // Senhas fora dos limites na API (6..128)
     assert.equal(
       (await rawRequest(instanceA.baseUrl, '/api/register', {
         method: 'POST',
-        body: { name: 'Ana', email: 'ana@sec.local', password: '14chars-curta!' }
+        body: { name: 'Ana', email: 'ana@sec.local', password: '12345' }
       })).status,
       400
     );
@@ -300,7 +305,7 @@ test('SQLite isolado: sessões multi-instância, expiração, logout, rate limit
 
     const regB = await rawRequest(instanceA.baseUrl, '/api/register', {
       method: 'POST',
-      body: { name: 'Bruno', email: 'bruno@sec.local', password: 'PasswordForte!2' }
+      body: { name: 'Bruno', email: 'bruno@sec.local', password: '123456' }
     });
     assert.equal(regB.status, 201);
 
@@ -373,7 +378,7 @@ test('SQLite isolado: sessões multi-instância, expiração, logout, rate limit
     // Isolamento entre contas via API (Ana vs Bruno)
     const loginBruno = await rawRequest(instanceB.baseUrl, '/api/login', {
       method: 'POST',
-      body: { email: 'bruno@sec.local', password: 'PasswordForte!2' }
+      body: { email: 'bruno@sec.local', password: '123456' }
     });
     assert.equal(loginBruno.status, 200);
     const tokenBruno = loginBruno.body.token;
@@ -515,7 +520,7 @@ test('SQLite isolado: sessões multi-instância, expiração, logout, rate limit
     }));
     const loginShort = await rawRequest(instanceA.baseUrl, '/api/login', {
       method: 'POST',
-      body: { email: 'bruno@sec.local', password: 'PasswordForte!2' }
+      body: { email: 'bruno@sec.local', password: '123456' }
     });
     assert.equal(loginShort.status, 200);
     const shortToken = loginShort.body.token;

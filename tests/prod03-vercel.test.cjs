@@ -821,8 +821,8 @@ test('PROD-03 Integração @vercel/functions: attachDatabasePool e waitUntil inv
   await assert.doesNotReject(() => scheduleBackgroundTask(Promise.reject(new Error('ignorado'))));
 });
 
-test('PROD-03 SEC-01 Scrypt & Rehash transparente (SQLite): N=32768, r=8, p=3, politica 15..128 e upgrade p=1 -> p=3', async () => {
-  assert.equal(MIN_PASSWORD_LENGTH, 15);
+test('PROD-03 SEC-01 Scrypt & Rehash transparente (SQLite): N=32768, r=8, p=3, politica 6..128 e upgrade p=1 -> p=3', async () => {
+  assert.equal(MIN_PASSWORD_LENGTH, 6);
   assert.equal(MAX_PASSWORD_LENGTH, 128);
   assert.deepEqual(SCRYPT_PARAMS, {
     N: 32768,
@@ -834,7 +834,7 @@ test('PROD-03 SEC-01 Scrypt & Rehash transparente (SQLite): N=32768, r=8, p=3, p
   });
 
   const pm = createPasswordManager({ SCRYPT_MAX_CONCURRENT: '4', SCRYPT_MAX_QUEUE: '1' });
-  assert.equal(pm.validatePasswordStrength('Curta@14chars!').valid, false);
+  assert.equal(pm.validatePasswordStrength('12345').valid, false);
   assert.equal(pm.validatePasswordStrength('ValidaCom15Char').valid, true);
 
   const hash = await pm.hashPassword('SenhaForte#2026!');
@@ -1157,20 +1157,20 @@ test('PROD-03 Navegador real (Chromium/Edge) + CDN public/ + VERCEL=1 API: fluxo
     const uniqueEmail = `e2e.${Date.now()}@academico.local`;
     const userPass = 'OrganizaMais#2026!';
 
-    // 2. Cadastro em cadastro.html (valida politica minima 15 caracteres + cria conta)
+    // 2. Cadastro em cadastro.html (valida politica minima 6 caracteres + cria conta)
     await client.send('Page.navigate', { url: `${edge.baseUrl}/cadastro.html` });
     await waitForBrowserCondition(client, 'document.readyState === "complete" && Boolean(document.getElementById("registerForm"))');
 
     const minLengthAttr = await client.evaluate('document.querySelector("#registerForm input[name=password]").getAttribute("minlength")');
-    assert.equal(minLengthAttr, '15');
+    assert.equal(minLengthAttr, '6');
 
     await client.evaluate(`
       document.querySelector('#registerForm input[name=name]').value = 'Estudante Vercel';
       document.querySelector('#registerForm input[name=email]').value = ${JSON.stringify(uniqueEmail)};
-      document.querySelector('#registerForm input[name=password]').value = 'Curta14Chars!';
+      document.querySelector('#registerForm input[name=password]').value = '12345';
       document.querySelector('#registerForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     `);
-    await waitForBrowserCondition(client, 'document.getElementById("message").textContent.includes("entre 15 e 128")');
+    await waitForBrowserCondition(client, 'document.getElementById("message").textContent.includes("entre 6 e 128")');
 
     await client.evaluate(`
       document.querySelector('#registerForm input[name=password]').value = ${JSON.stringify(userPass)};
@@ -1334,5 +1334,168 @@ test('PROD-03 Migration 005 rollback: revoga GRANT UPDATE (password_hash) e remo
   } finally {
     await targetPool.end();
     await rbPortDb.end();
+  }
+});
+
+test('migration 006 e servidor isolam contexto RLS, pooling e autenticacao', async () => {
+  const { withUserTransaction } = require('../security-proposals/rls-transaction.cjs');
+  await tlsCluster.adminDefaultPool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
+  END $$`);
+  await tlsCluster.adminDefaultPool.query('CREATE DATABASE organiza_rls_draft');
+  const admin = new Pool({
+    host: '127.0.0.1', port: tlsCluster.port, user: 'postgres', database: 'organiza_rls_draft',
+    ssl: { ca: tlsCluster.certPem, rejectUnauthorized: true }
+  });
+  const runtime = new Pool({
+    host: '127.0.0.1', port: tlsCluster.port, user: 'organiza_app',
+    password: tlsCluster.runtimePassword, database: 'organiza_rls_draft', max: 1,
+    ssl: { ca: tlsCluster.certPem, rejectUnauthorized: true }
+  });
+  try {
+    await admin.query(m001);
+    await admin.query(m002);
+    await admin.query(m003);
+    await admin.query(m004);
+    await admin.query(m005);
+    const users = await admin.query("INSERT INTO public.users (name, email, password_hash) VALUES ('A','a@rls.test','dummy'), ('B','b@rls.test','dummy') RETURNING id");
+    const [a, b] = users.rows.map(row => row.id);
+    await admin.query("INSERT INTO public.disciplines (user_id, name) VALUES ($1, 'A'), ($2, 'B')", [a, b]);
+    await admin.query("INSERT INTO public.tasks (user_id, title) VALUES ($1, 'A'), ($2, 'B')", [a, b]);
+    await admin.query(fs.readFileSync(path.join(ROOT, 'migrations', '006_rls_runtime.sql'), 'utf8'));
+    await admin.query('CREATE POLICY teste_permissiva ON public.tasks FOR ALL TO organiza_app USING (true) WITH CHECK (true)');
+
+    assert.equal((await runtime.query('SELECT id FROM public.tasks')).rowCount, 0);
+    await assert.rejects(() => runtime.query("INSERT INTO public.tasks (user_id, title) VALUES ($1, 'sem contexto')", [a]), { code: '42501' });
+    const visibleA = await withUserTransaction(runtime, a, c => c.query('SELECT user_id FROM public.tasks'));
+    assert.deepEqual(visibleA.rows.map(row => row.user_id), [a]);
+    const visibleB = await withUserTransaction(runtime, b, c => c.query('SELECT user_id FROM public.disciplines'));
+    assert.deepEqual(visibleB.rows.map(row => row.user_id), [b]);
+    assert.equal((await runtime.query('SELECT id FROM public.disciplines')).rowCount, 0);
+    const changed = await withUserTransaction(runtime, a, c => c.query("UPDATE public.tasks SET title = 'indevida' WHERE user_id = $1", [b]));
+    assert.equal(changed.rowCount, 0);
+    await assert.rejects(() => withUserTransaction(runtime, a, c => c.query("INSERT INTO public.tasks (user_id, title) VALUES ($1, 'indevida')", [b])), { code: '42501' });
+    await assert.rejects(() => withUserTransaction(runtime, a, async c => {
+      await c.query("INSERT INTO public.tasks (user_id, title) VALUES ($1, 'rollback')", [a]);
+      throw new Error('falha simulada');
+    }), /falha simulada/);
+    assert.equal((await withUserTransaction(runtime, a, c => c.query('SELECT id FROM public.tasks'))).rowCount, 1);
+    assert.equal((await runtime.query('SELECT id FROM public.tasks')).rowCount, 0);
+    await assert.rejects(() => withUserTransaction(runtime, 0, () => {}), /Identidade/);
+
+    const role = await runtime.query('SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user');
+    assert.equal(role.rows[0].current_user, 'organiza_app');
+    assert.equal(role.rows[0].rolsuper, false);
+    assert.equal(role.rows[0].rolbypassrls, false);
+    const publicGrants = await admin.query("SELECT has_table_privilege('anon', 'public.users', 'SELECT') AS anon_users, has_table_privilege('authenticated', 'public.tasks', 'SELECT') AS authenticated_tasks");
+    assert.equal(publicGrants.rows[0].anon_users, false);
+    assert.equal(publicGrants.rows[0].authenticated_tasks, false);
+    const grants = await runtime.query("SELECT has_column_privilege(current_user, 'public.sessions', 'revoked_at', 'UPDATE') AS revoke_ok, has_column_privilege(current_user, 'public.sessions', 'user_id', 'UPDATE') AS owner_update");
+    assert.equal(grants.rows[0].revoke_ok, true);
+    assert.equal(grants.rows[0].owner_update, false);
+    const url = new URL(tlsCluster.runtimeDatabaseUrl);
+    url.pathname = '/organiza_rls_draft';
+    const app = loadIsolatedEntrypoint({
+      VERCEL: '1', NODE_ENV: 'production', DB_CLIENT: 'postgres',
+      DATABASE_URL: url.toString(), DB_SSL_CA: tlsCluster.certPem,
+      DB_POOL_MAX: '1', RATE_LIMIT_REGISTER_MAX: '20'
+    });
+    const srv = await startHttpServer(app);
+    try {
+      const accounts = [
+        { name: 'Ana', email: 'ana@rls.test', password: '123456' },
+        { name: 'Bia', email: 'bia@rls.test', password: 'abc123' }
+      ];
+      const tokens = [];
+      for (const account of accounts) {
+        assert.equal((await rawRequest(srv.baseUrl, '/api/register', { method: 'POST', body: account })).status, 201);
+        const login = await rawRequest(srv.baseUrl, '/api/login', { method: 'POST', body: account });
+        assert.equal(login.status, 200);
+        tokens.push(login.body.token);
+      }
+      const oldSalt = crypto.randomBytes(16);
+      const oldKey = await new Promise((resolve, reject) => {
+        crypto.scrypt(accounts[0].password, oldSalt, 32, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 },
+          (err, key) => err ? reject(err) : resolve(key));
+      });
+      const oldHash = `$scrypt$v=1$N=32768,r=8,p=1$${oldSalt.toString('base64url')}$${oldKey.toString('base64url')}`;
+      await admin.query('UPDATE public.users SET password_hash = $1 WHERE email = $2', [oldHash, accounts[0].email]);
+      assert.equal((await rawRequest(srv.baseUrl, '/api/login', { method: 'POST', body: accounts[0] })).status, 200);
+      const upgraded = await admin.query('SELECT password_hash FROM public.users WHERE email = $1', [accounts[0].email]);
+      assert.match(upgraded.rows[0].password_hash, /^\$scrypt\$v=1\$N=32768,r=8,p=3\$/);
+      const ownerId = (await admin.query('SELECT id FROM public.users WHERE email = $1', [accounts[0].email])).rows[0].id;
+      const activeDelete = await srv.db.withUserContext(ownerId, () => srv.db.query('DELETE FROM sessions WHERE user_id = ?', [ownerId]));
+      assert.equal(activeDelete.rowCount, 0);
+      const created = await rawRequest(srv.baseUrl, '/api/disciplines', {
+        method: 'POST', token: tokens[0], body: { name: 'Privada Ana' }
+      });
+      assert.equal(created.status, 201);
+      const other = await rawRequest(srv.baseUrl, '/api/disciplines', { token: tokens[1] });
+      assert.equal(other.status, 200);
+      assert.equal(other.body.length, 0);
+      const concurrent = await Promise.all(tokens.map(token => rawRequest(srv.baseUrl, '/api/disciplines', { token })));
+      assert.equal(concurrent[0].body.length, 1);
+      assert.equal(concurrent[1].body.length, 0);
+      assert.equal((await srv.db.pool.query('SELECT id FROM public.disciplines')).rowCount, 0);
+      assert.equal((await srv.db.pool.query('SELECT id FROM public.users')).rowCount, 0);
+      assert.equal((await srv.db.pool.query('SELECT id FROM public.sessions')).rowCount, 0);
+      // Um valor de sessao preexistente no pool nao pode contaminar consultas do adapter.
+      await srv.db.pool.query("SELECT set_config('app.current_user_id', $1, false)", [String(a)]);
+      assert.equal((await srv.db.query('SELECT id FROM public.tasks')).rowCount, 0);
+      await srv.db.pool.query("SELECT set_config('app.current_user_id', '', false)");
+      const invalid = await rawRequest(srv.baseUrl, '/api/login', {
+        method: 'POST', body: { email: accounts[0].email, password: 'incorreta' }
+      });
+      assert.equal(invalid.status, 401);
+      const task = await rawRequest(srv.baseUrl, '/api/tasks', {
+        method: 'POST', token: tokens[0], body: { title: 'Tarefa Ana', discipline_id: created.body.id }
+      });
+      assert.equal(task.status, 201);
+      const crossTask = await rawRequest(srv.baseUrl, '/api/tasks', {
+        method: 'POST', token: tokens[1], body: { title: 'Tentativa cruzada', discipline_id: created.body.id }
+      });
+      assert.equal(crossTask.status, 404);
+      assert.equal((await rawRequest(srv.baseUrl, '/api/tasks', { token: tokens[1] })).body.length, 0);
+      assert.equal((await rawRequest(srv.baseUrl, `/api/tasks/${task.body.id}`, {
+        method: 'PUT', token: tokens[1], body: { title: 'Invasão', priority: 'Alta' }
+      })).status, 404);
+      assert.equal((await rawRequest(srv.baseUrl, `/api/tasks/${task.body.id}`, {
+        method: 'PUT', token: tokens[0], body: { title: 'Editada', priority: 'Alta', discipline_id: created.body.id }
+      })).status, 200);
+      assert.equal((await rawRequest(srv.baseUrl, `/api/tasks/${task.body.id}/status`, {
+        method: 'PATCH', token: tokens[0], body: { status: 'Concluída' }
+      })).status, 200);
+      assert.equal((await rawRequest(srv.baseUrl, `/api/tasks/${task.body.id}`, { method: 'DELETE', token: tokens[1] })).status, 404);
+      assert.equal((await rawRequest(srv.baseUrl, `/api/tasks/${task.body.id}`, { method: 'DELETE', token: tokens[0] })).status, 200);
+      assert.equal((await rawRequest(srv.baseUrl, `/api/disciplines/${created.body.id}`, { method: 'DELETE', token: tokens[1] })).status, 404);
+      assert.equal((await rawRequest(srv.baseUrl, `/api/disciplines/${created.body.id}`, { method: 'DELETE', token: tokens[0] })).status, 200);
+      const { cleanupExpiredSessions } = require('../backend/security/session');
+      const expiredToken = crypto.randomBytes(32).toString('base64url');
+      const expiredHash = crypto.createHash('sha256').update(expiredToken).digest('hex');
+      await admin.query("INSERT INTO public.sessions (user_id, token_hash, expires_at) VALUES ($1, $2, now() - interval '1 hour')", [a, expiredHash]);
+      assert.equal((await rawRequest(srv.baseUrl, '/api/tasks', { token: expiredToken })).status, 401);
+      await admin.query("INSERT INTO public.sessions (user_id, token_hash, expires_at) VALUES ($1, $2, now() - interval '1 hour')", [a, 'e'.repeat(64)]);
+      assert.ok(await cleanupExpiredSessions(srv.db) >= 1);
+      assert.equal((await admin.query('SELECT id FROM public.sessions WHERE token_hash = $1', ['e'.repeat(64)])).rowCount, 0);
+      assert.equal((await rawRequest(srv.baseUrl, '/api/logout', { method: 'POST', token: tokens[0] })).status, 200);
+      assert.equal((await rawRequest(srv.baseUrl, '/api/tasks', { token: tokens[0] })).status, 401);
+      const { consumeRateLimit, resetRateLimit, cleanupExpiredRateLimits } = require('../backend/security/rate-limit');
+      const limit = { scope: 'teste-rls', identifier: 'conta-ficticia', maxAttempts: 2, windowMs: 5000, blockMs: 5000 };
+      assert.equal((await consumeRateLimit(srv.db, limit)).allowed, true);
+      assert.equal((await consumeRateLimit(srv.db, limit)).allowed, true);
+      assert.equal((await consumeRateLimit(srv.db, limit)).allowed, false);
+      await resetRateLimit(srv.db, limit);
+      assert.equal((await consumeRateLimit(srv.db, limit)).allowed, true);
+      assert.ok(await cleanupExpiredRateLimits(srv.db, { nowMs: Date.now() + 24 * 60 * 60 * 1000 }) >= 1);
+    } finally {
+      await srv.close();
+    }
+    await admin.query('DROP POLICY teste_permissiva ON public.tasks');
+    await admin.query(fs.readFileSync(path.join(ROOT, 'migrations', 'rollback', '006_rls_runtime_down.sql'), 'utf8'));
+    assert.ok((await runtime.query('SELECT id FROM public.tasks')).rowCount >= 2);
+  } finally {
+    await runtime.end();
+    await admin.end();
   }
 });

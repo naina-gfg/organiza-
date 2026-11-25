@@ -7,7 +7,7 @@
   "functions": {
     "server.js": {
       "maxDuration": 30,
-      "excludeFiles": "{tests/**,migrations/**,scripts/**,frontend/**,node_modules/sqlite3/**,*.md,*.db}"
+      "excludeFiles": "{tests/**,migrations/**,academico/**,security-proposals/**,scripts/**,frontend/**,node_modules/sqlite3/**,*.md,*.db}"
     }
   },
   "headers": [

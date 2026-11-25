@@ -2,8 +2,8 @@
 
 const crypto = require('node:crypto');
 
-// OWASP Authentication Cheat Sheet (sem MFA): minimo 15 caracteres; maximo >= 64 (128).
-const MIN_PASSWORD_LENGTH = 15;
+// Politica de cadastro definida para o sistema oficial.
+const MIN_PASSWORD_LENGTH = 6;
 const MAX_PASSWORD_LENGTH = 128;
 
 // OWASP Password Storage Cheat Sheet para scrypt (tier equilibrado 32 MiB para serverless):

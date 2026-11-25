@@ -2,11 +2,11 @@
 
 Aplicação web para organização acadêmica, gerenciamento de disciplinas, tarefas, filtros/ordenação de prazos e dashboard analítico.
 
-## Estado atual (Baseline PROD-02A)
+## Estado da versão candidata
 
-Esta cópia independente foi preparada para futura implantação em produção (GitHub + Supabase PostgreSQL + Vercel Hobby), preservando integralmente as funcionalidades homologadas até o **FUNC-04B + BUGFIX-04-01** e os **31 testes automatizados** existentes.
+Esta versão candidata preserva a aplicação oficial de organização acadêmica. O visualizador e os módulos do laboratório são mantidos separadamente e não integram o artefato implantável.
 
-> **Nota:** Nesta etapa (`PROD-02A`), a aplicação ainda utiliza **SQLite local** (`backend/plataforma.db`, ignorado pelo Git) e autenticação em memória para execução local controlada. A adaptação para PostgreSQL e sessões compatíveis com Vercel Functions ocorrerá na etapa seguinte (`PROD-02B`).
+O ambiente local pode usar SQLite. Em produção, a aplicação exige PostgreSQL e TLS com validação de certificado. Sessões e limites de tentativas são persistidos no banco. O cadastro aceita senhas de 6 a 128 caracteres e armazena hashes scrypt. A migration 006 e seu rollback exigem homologação no ambiente existente antes de qualquer publicação; veja [a orientação operacional](security-proposals/README.md).
 
 ## Requisitos
 
@@ -37,10 +37,11 @@ $env:PORT=3200; npm start
 npm test
 ```
 
-Os testes executam em modo isolado com mocks e SQLite em memória (`:memory:`), sem alterar o banco local.
+As suítes utilizam bancos SQLite e PostgreSQL temporários, mocks e navegador local conforme o caso. A suíte PostgreSQL/Vercel requer binários locais de PostgreSQL, OpenSSL e Chromium ou Edge. Não configure essas suítes para um banco de produção.
 
 ## Estrutura do projeto
 
-- `backend/` — servidor Express e camada de acesso SQLite (`server.js`, `database.js`)
+- `backend/` — servidor Express e adaptadores SQLite/PostgreSQL (`server.js`, `database.js`)
 - `frontend/` — interface web estática (HTML, CSS e JavaScript Vanilla)
-- `tests/` — suítes automatizadas (`seg01`, `func02`, `func03`, `func04`)
+- `tests/` — suítes automatizadas de funcionalidade, segurança e integração
+- `security-proposals/` — experimentos locais de segurança, excluídos da implantação
