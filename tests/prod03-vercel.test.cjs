@@ -821,8 +821,8 @@ test('PROD-03 Integração @vercel/functions: attachDatabasePool e waitUntil inv
   await assert.doesNotReject(() => scheduleBackgroundTask(Promise.reject(new Error('ignorado'))));
 });
 
-test('PROD-03 SEC-01 Scrypt & Rehash transparente (SQLite): N=32768, r=8, p=3, politica 15..128 e upgrade p=1 -> p=3', async () => {
-  assert.equal(MIN_PASSWORD_LENGTH, 15);
+test('PROD-03 SEC-01 Scrypt & Rehash transparente (SQLite): N=32768, r=8, p=3, politica 6..128 e upgrade p=1 -> p=3', async () => {
+  assert.equal(MIN_PASSWORD_LENGTH, 6);
   assert.equal(MAX_PASSWORD_LENGTH, 128);
   assert.deepEqual(SCRYPT_PARAMS, {
     N: 32768,
@@ -834,7 +834,7 @@ test('PROD-03 SEC-01 Scrypt & Rehash transparente (SQLite): N=32768, r=8, p=3, p
   });
 
   const pm = createPasswordManager({ SCRYPT_MAX_CONCURRENT: '4', SCRYPT_MAX_QUEUE: '1' });
-  assert.equal(pm.validatePasswordStrength('Curta@14chars!').valid, false);
+  assert.equal(pm.validatePasswordStrength('12345').valid, false);
   assert.equal(pm.validatePasswordStrength('ValidaCom15Char').valid, true);
 
   const hash = await pm.hashPassword('SenhaForte#2026!');
@@ -1157,20 +1157,20 @@ test('PROD-03 Navegador real (Chromium/Edge) + CDN public/ + VERCEL=1 API: fluxo
     const uniqueEmail = `e2e.${Date.now()}@academico.local`;
     const userPass = 'OrganizaMais#2026!';
 
-    // 2. Cadastro em cadastro.html (valida politica minima 15 caracteres + cria conta)
+    // 2. Cadastro em cadastro.html (valida politica minima 6 caracteres + cria conta)
     await client.send('Page.navigate', { url: `${edge.baseUrl}/cadastro.html` });
     await waitForBrowserCondition(client, 'document.readyState === "complete" && Boolean(document.getElementById("registerForm"))');
 
     const minLengthAttr = await client.evaluate('document.querySelector("#registerForm input[name=password]").getAttribute("minlength")');
-    assert.equal(minLengthAttr, '15');
+    assert.equal(minLengthAttr, '6');
 
     await client.evaluate(`
       document.querySelector('#registerForm input[name=name]').value = 'Estudante Vercel';
       document.querySelector('#registerForm input[name=email]').value = ${JSON.stringify(uniqueEmail)};
-      document.querySelector('#registerForm input[name=password]').value = 'Curta14Chars!';
+      document.querySelector('#registerForm input[name=password]').value = '12345';
       document.querySelector('#registerForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     `);
-    await waitForBrowserCondition(client, 'document.getElementById("message").textContent.includes("entre 15 e 128")');
+    await waitForBrowserCondition(client, 'document.getElementById("message").textContent.includes("entre 6 e 128")');
 
     await client.evaluate(`
       document.querySelector('#registerForm input[name=password]').value = ${JSON.stringify(userPass)};
