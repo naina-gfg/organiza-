@@ -38,5 +38,6 @@ FUNC*-*.md
 PROD*-*.md
 
 # Exclusao preventiva de artefatos didaticos externos
+academico/
 *visualizador*
 *didatico*

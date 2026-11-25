@@ -1,6 +1,8 @@
 # Arquivos versionados apenas para testes, migrations manuais e documentacao
 tests/
 migrations/
+academico/
+security-proposals/
 README.md
 *.md
 
