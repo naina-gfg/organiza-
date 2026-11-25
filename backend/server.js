@@ -180,6 +180,10 @@ async function auth(req, res, next) {
     req.userId = session.userId;
     req.sessionId = session.sessionId;
     req.tokenHash = session.tokenHash;
+    // A identidade deriva exclusivamente da sessao validada, nunca do payload.
+    if (typeof db.withUserContext === 'function') {
+      return db.withUserContext(session.userId, next);
+    }
     next();
   } catch (err) {
     console.error('[auth error]:', sanitizeErrorMessage(err));
@@ -236,7 +240,7 @@ app.post('/api/register', async (req, res) => {
     const passwordHash = await passwordManager.hashPassword(password);
     scheduleBackgroundTask(cleanupExpiredRateLimits(db));
 
-    db.run(
+    const insertUser = () => db.run(
       'INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)',
       [cleanName, cleanEmail, passwordHash],
       function (err) {
@@ -249,6 +253,8 @@ app.post('/api/register', async (req, res) => {
         res.status(201).json({ message: 'Cadastro realizado com sucesso.' });
       }
     );
+    if (typeof db.withEmailContext === 'function') db.withEmailContext(cleanEmail, insertUser);
+    else insertUser();
   } catch (err) {
     return handleCryptoError(err, res, 'Erro ao cadastrar usuário.');
   }
@@ -304,7 +310,7 @@ app.post('/api/login', async (req, res) => {
       );
     }
 
-    db.get(
+    const findUser = () => db.get(
       'SELECT id, name, email, password_hash FROM users WHERE email = ?',
       [cleanEmail],
       async (err, user) => {
@@ -323,9 +329,11 @@ app.post('/api/login', async (req, res) => {
           if (passwordManager.needsRehash(user.password_hash)) {
             try {
               const upgradedHash = await passwordManager.upgradePasswordHash(password);
-              await new Promise((resolve) => {
+              const updateHash = () => new Promise((resolve) => {
                 db.run('UPDATE users SET password_hash = ? WHERE id = ?', [upgradedHash, user.id], () => resolve());
               });
+              if (typeof db.withUserContext === 'function') await db.withUserContext(Number(user.id), updateHash);
+              else await updateHash();
             } catch {
               // Se o upgrade oportunista falhar (ex.: CryptoBusyError), preserva a autenticacao valida.
             }
@@ -344,6 +352,8 @@ app.post('/api/login', async (req, res) => {
         }
       }
     );
+    if (typeof db.withEmailContext === 'function') db.withEmailContext(cleanEmail, findUser);
+    else findUser();
   } catch (err) {
     return handleCryptoError(err, res, 'Erro interno.');
   }

@@ -57,11 +57,14 @@ function dbRun(db, sql, params = []) {
 async function cleanupExpiredSessions(db, { nowMs = Date.now(), revokedGraceMs = REVOKED_RETENTION_MS } = {}) {
   const nowIso = new Date(nowMs).toISOString();
   const revokedBeforeIso = new Date(nowMs - revokedGraceMs).toISOString();
-  const result = await dbRun(
+  const cleanup = () => dbRun(
     db,
     'DELETE FROM sessions WHERE expires_at <= ? OR (revoked_at IS NOT NULL AND revoked_at <= ?)',
     [nowIso, revokedBeforeIso]
   );
+  const result = typeof db.withSessionCleanup === 'function'
+    ? await db.withSessionCleanup(cleanup)
+    : await cleanup();
   return result.changes;
 }
 
@@ -70,11 +73,13 @@ async function createSession(db, userId, { ttlMs = DEFAULT_SESSION_TTL_MS, nowMs
   const tokenHash = hashSessionToken(token);
   const expiresAt = new Date(nowMs + ttlMs).toISOString();
 
-  await dbRun(
+  const insertSession = () => dbRun(
     db,
     'INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)',
     [userId, tokenHash, expiresAt]
   );
+  if (typeof db.withUserContext === 'function') await db.withUserContext(Number(userId), insertSession);
+  else await insertSession();
 
   // Limpeza controlada via waitUntil (Vercel) / promessa protegida local
   scheduleBackgroundTask(cleanupExpiredSessions(db, { nowMs }));
@@ -88,14 +93,16 @@ async function validateSession(db, token, { nowMs = Date.now() } = {}) {
   }
 
   const tokenHash = hashSessionToken(token);
-  const row = await dbGet(
+  const findSession = () => dbGet(
     db,
     `SELECT s.id, s.user_id, s.expires_at, s.revoked_at
      FROM sessions s
-     INNER JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ?`,
     [tokenHash]
   );
+  const row = typeof db.withTokenContext === 'function'
+    ? await db.withTokenContext(tokenHash, findSession)
+    : await findSession();
 
   if (!row || row.revoked_at !== null) {
     return null;
@@ -103,7 +110,10 @@ async function validateSession(db, token, { nowMs = Date.now() } = {}) {
 
   const expiresMs = new Date(row.expires_at).getTime();
   if (!Number.isFinite(expiresMs) || expiresMs <= nowMs) {
-    await dbRun(db, 'DELETE FROM sessions WHERE id = ?', [Number(row.id)]).catch(() => {});
+    const removeExpired = () => dbRun(db, 'DELETE FROM sessions WHERE id = ?', [Number(row.id)]);
+    await (typeof db.withTokenContext === 'function'
+      ? db.withTokenContext(tokenHash, removeExpired)
+      : removeExpired()).catch(() => {});
     return null;
   }
 
@@ -126,11 +136,14 @@ async function revokeSession(db, { sessionId, userId, tokenHash }, { nowMs = Dat
     return result.changes;
   }
   if (tokenHash) {
-    const result = await dbRun(
+    const revokeByToken = () => dbRun(
       db,
       'UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL',
       [revokedAt, tokenHash]
     );
+    const result = typeof db.withTokenContext === 'function'
+      ? await db.withTokenContext(tokenHash, revokeByToken)
+      : await revokeByToken();
     return result.changes;
   }
   return 0;

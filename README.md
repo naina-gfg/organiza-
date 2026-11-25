@@ -6,7 +6,7 @@ Aplicação web para organização acadêmica, gerenciamento de disciplinas, tar
 
 Esta versão candidata preserva a aplicação oficial de organização acadêmica. O visualizador e os módulos do laboratório são mantidos separadamente e não integram o artefato implantável.
 
-O ambiente local pode usar SQLite. Em produção, a aplicação exige PostgreSQL e TLS com validação de certificado. Sessões e limites de tentativas são persistidos no banco. O cadastro aceita senhas de 6 a 128 caracteres e armazena hashes scrypt. A revisão de RLS e a homologação no ambiente real continuam necessárias antes de qualquer publicação.
+O ambiente local pode usar SQLite. Em produção, a aplicação exige PostgreSQL e TLS com validação de certificado. Sessões e limites de tentativas são persistidos no banco. O cadastro aceita senhas de 6 a 128 caracteres e armazena hashes scrypt. A migration 006 e seu rollback exigem homologação no ambiente existente antes de qualquer publicação; veja [a orientação operacional](security-proposals/README.md).
 
 ## Requisitos
 
